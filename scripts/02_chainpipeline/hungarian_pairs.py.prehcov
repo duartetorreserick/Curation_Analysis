@@ -1,0 +1,255 @@
+#!/usr/bin/env python3
+"""
+hungarian_pairs.py — globally optimal T2T ↔ assembly chromosome pairing.
+
+Reads a PAF alignment file, builds a score matrix
+    rows    = T2T chromosome prefixes (FASTA header with last _N stripped)
+    columns = assembly sequence names
+    values  = total aligned bases (PAF col 10)
+
+Runs scipy.optimize.linear_sum_assignment (Hungarian algorithm) to find the
+globally optimal 1-to-1 assignment that maximises total aligned bases.
+
+Haplotype blocks
+----------------
+A Mat_ sequence must pair with a Mat_ chromosome and a Pat_ with a Pat_. Total
+aligned bases do NOT enforce this on their own: the score measures how much of
+a chromosome aligns (coverage, completeness, repeat content), not identity, so
+it can prefer the wrong haplotype by a wide margin. The constraint is imposed
+directly instead, in two passes:
+
+  1. solve the assignment separately inside each haplotype block
+  2. solve whatever is left over across haplotypes
+
+Pass 2 exists for the sex chromosomes: in a female bird the T2T carries Z and W
+on one haplotype only, so Mat_chromosome_Z has no Mat_ counterpart and its true
+partner Pat_SUPER_Z is necessarily cross-haplotype. Making it a leftover rather
+than a forbidden cell keeps the pair without weakening the rule elsewhere.
+
+With no Mat_/Pat_ labels present, pass 1 is empty and pass 2 reduces to the
+original single global assignment.
+
+Output: two-column TSV  <full_T2T_header> TAB <asm_seq_name>
+  The full T2T header (col 1) matches the FASTA header exactly, so it works
+  with the awk strip-on-read pattern used in the pipeline's chain-filter step.
+
+Usage:
+    python3 hungarian_pairs.py  <in.paf>  <out_pairs.tsv>
+"""
+import sys
+import re
+from collections import defaultdict
+
+import numpy as np
+from scipy.optimize import linear_sum_assignment
+
+
+def haplotype(name):
+    """'M' | 'P' | None — from a Mat_/Pat_ prefix or a .mat/.pat suffix."""
+    low = name.lower()
+    if low.startswith('mat_') or low.endswith('.mat'):
+        return 'M'
+    if low.startswith('pat_') or low.endswith('.pat'):
+        return 'P'
+    return None
+
+
+def chrom_group(name):
+    """Mat_NC_133041.1_chromosome_16 -> chromosome_16 (both haplotypes)."""
+    s = re.sub(r'^(Mat|Pat)_', '', name, flags=re.I)
+    m = re.search(r'chromosome_\S+$', s)
+    return m.group(0) if m else s
+
+
+def super_group(name):
+    """Mat_SUPER_23.H1 / SUPER_23.mat -> SUPER_23 (both haplotypes)."""
+    s = re.sub(r'^(Mat|Pat)_', '', name, flags=re.I)
+    return re.sub(r'\.(mat|pat|H\d+)$', '', s, flags=re.I)
+
+
+def main():
+    argv = sys.argv[1:]
+    min_frac = 0.05
+    if '--min-frac' in argv:
+        i = argv.index('--min-frac')
+        try:
+            min_frac = float(argv[i + 1])
+        except (IndexError, ValueError):
+            sys.exit("ERROR: --min-frac needs a number")
+        del argv[i:i + 2]
+    if len(argv) != 2:
+        sys.exit(f"Usage: {sys.argv[0]} <in.paf> <out_pairs.tsv> [--min-frac F]")
+    if not (0.0 <= min_frac < 1.0):
+        sys.exit("ERROR: --min-frac must be in [0, 1)")
+
+    paf_path, out_path = argv[0], argv[1]
+
+    t2t_order = []   # T2T prefixes in first-seen order
+    asm_order = []   # assembly sequence names in first-seen order
+    t2t_idx = {}     # prefix → matrix row index
+    asm_idx = {}     # asm name → matrix col index
+    t2t_full = {}    # prefix → full T2T FASTA header (first seen)
+    scores = defaultdict(float)
+    skipped_unloc = set()   # unlocs: no compiten por un cromosoma
+
+    with open(paf_path) as fh:
+        for line in fh:
+            f = line.split('\t')
+            if len(f) < 10:
+                continue
+            q_name = f[0]    # assembly sequence (query)
+            # Un unloc no está colocado: no puede ser el partner 1-a-1 de un
+            # cromosoma. Sin esto, un unloc grande puede quedarse con un
+            # cromosoma cuyo SUPER real ya fue asignado a otra fila.
+            if '_unloc_' in q_name:
+                skipped_unloc.add(q_name)
+                continue
+            t_name = f[5]    # T2T chromosome (target, full FASTA header)
+            try:
+                n_matches = int(f[9])
+            except ValueError:
+                continue
+            if n_matches == 0:
+                continue
+
+            # strip last _token (chromosome number suffix) to get T2T prefix
+            t_prefix = re.sub(r'_[^_]+$', '', t_name)
+
+            if t_prefix not in t2t_idx:
+                t2t_idx[t_prefix] = len(t2t_order)
+                t2t_order.append(t_prefix)
+                t2t_full[t_prefix] = t_name
+            if q_name not in asm_idx:
+                asm_idx[q_name] = len(asm_order)
+                asm_order.append(q_name)
+
+            scores[(t2t_idx[t_prefix], asm_idx[q_name])] += n_matches
+
+    n_t, n_a = len(t2t_order), len(asm_order)
+    if n_t == 0 or n_a == 0:
+        sys.exit("ERROR: no valid alignments in PAF — cannot generate pairs")
+
+    mat = np.zeros((n_t, n_a), dtype=np.float64)
+    for (ti, ai), v in scores.items():
+        mat[ti, ai] = v
+
+    t_hap = [haplotype(t2t_full[p]) for p in t2t_order]
+    a_hap = [haplotype(n) for n in asm_order]
+
+    taken_rows, taken_cols, pairs = set(), set(), []
+
+    # A real partner takes a decent share of everything the scaffold aligns.
+    # Without this floor a forced 1-to-1 invents pairs out of noise: inside the
+    # Pat block, Pat_SUPER_Z was matched to chromosome_36 on 0.11% of its bases
+    # while its true partner, Mat_chromosome_Z, holds 82% — and being consumed
+    # there, it never survived to the cross-haplotype pass.
+    col_total = mat.sum(axis=0)
+
+    def solve(rows, cols):
+        """Assign within this submatrix; keep pairs above the noise floor."""
+        if not rows or not cols:
+            return
+        sub = mat[np.ix_(rows, cols)]
+        ri, ci = linear_sum_assignment(sub, maximize=True)
+        for r, c in zip(ri, ci):
+            R, C = rows[r], cols[c]
+            if sub[r, c] <= 0:
+                continue
+            if col_total[C] > 0 and sub[r, c] / col_total[C] < min_frac:
+                continue
+            pairs.append((R, C))
+            taken_rows.add(R)
+            taken_cols.add(C)
+
+    # Pass 0 — sex chromosomes, by name, not by score. SUPER_Z goes with
+    # chromosome_Z and SUPER_W with chromosome_W, whatever the alignment says.
+    # They are then out of the Hungarian entirely: the T2T carries Z and W on a
+    # single haplotype, so leaving them in makes one block short of a partner
+    # and the forced 1-to-1 invents a pair out of noise.
+    n_sex = 0
+    for letter in ('Z', 'W'):
+        rows = [i for i in range(n_t)
+                if re.search(rf'_{letter}$', t2t_full[t2t_order[i]])]
+        cols = [j for j in range(n_a)
+                if re.search(rf'SUPER_{letter}(\.|$)', asm_order[j])]
+        for i, j in zip(rows, cols):
+            pairs.append((i, j))
+            taken_rows.add(i)
+            taken_cols.add(j)
+            n_sex += 1
+        if len(rows) != len(cols):
+            print(f'WARNING: {letter}: {len(rows)} T2T vs {len(cols)} asm seqs '
+                  f'— {abs(len(rows) - len(cols))} left unpaired', file=sys.stderr)
+
+    # Pass 1 — assign homologous GROUPS, not individual sequences.
+    # chromosome_16 means Mat_chr16 + Pat_chr16; SUPER_23 means Mat_SUPER_23 +
+    # Pat_SUPER_23. A group's score sums only same-haplotype cells (Mat×Mat and
+    # Pat×Pat), so the haplotype rule is built into the score, both haplotypes
+    # vote on one decision, and the mat/pat assignments cannot disagree —
+    # they are two halves of the same choice rather than two separate solves.
+    t_groups, a_groups = {}, {}
+    for i in range(n_t):
+        if i not in taken_rows:
+            t_groups.setdefault(chrom_group(t2t_full[t2t_order[i]]), []).append(i)
+    for j in range(n_a):
+        if j not in taken_cols:
+            a_groups.setdefault(super_group(asm_order[j]), []).append(j)
+
+    tg_names, ag_names = sorted(t_groups), sorted(a_groups)
+    G = np.zeros((len(tg_names), len(ag_names)), dtype=np.float64)
+    for gi, tg in enumerate(tg_names):
+        for gj, ag in enumerate(ag_names):
+            # Diagonal only: Mat×Mat + Pat×Pat. The cross terms measure a
+            # scaffold against the other haplotype's chromosome, which is not
+            # evidence for this pairing.
+            G[gi, gj] = sum(
+                mat[i, j] for i in t_groups[tg] for j in a_groups[ag]
+                if t_hap[i] is not None and t_hap[i] == a_hap[j]
+            )
+
+    g_col_total = G.sum(axis=0)
+    gi_idx, gj_idx = linear_sum_assignment(G, maximize=True)
+    n_same = 0
+    for gi, gj in zip(gi_idx, gj_idx):
+        if G[gi, gj] <= 0:
+            continue
+        if g_col_total[gj] > 0 and G[gi, gj] / g_col_total[gj] < min_frac:
+            continue
+        # expand the group pair into one pair per haplotype
+        for h in ('M', 'P'):
+            rows = [i for i in t_groups[tg_names[gi]] if t_hap[i] == h]
+            cols = [j for j in a_groups[ag_names[gj]] if a_hap[j] == h]
+            for i, j in zip(rows, cols):
+                if mat[i, j] > 0:
+                    pairs.append((i, j))
+                    taken_rows.add(i)
+                    taken_cols.add(j)
+                    n_same += 1
+
+    # Pass 2 — leftovers across haplotypes (anything unlabelled)
+    solve([i for i in range(n_t) if i not in taken_rows],
+          [j for j in range(n_a) if j not in taken_cols])
+    n_cross = len(pairs) - n_sex - n_same
+
+    pairs.sort()
+    with open(out_path, 'w') as out:
+        for r, c in pairs:
+            out.write(f'{t2t_full[t2t_order[r]]}\t{asm_order[c]}\n')
+
+    total_bases = int(sum(mat[r, c] for r, c in pairs))
+    print(
+        f'Hungarian: {n_t} T2T × {n_a} asm seqs → {len(pairs)} pairs '
+        f'({len(skipped_unloc)} unlocs excluidos; '
+        f'{n_sex} sexuales por regla + {n_same} dentro de haplotipo '
+        f'+ {n_cross} sobrantes; '
+        f'total aligned bases = {total_bases:,})',
+        file=sys.stderr,
+    )
+    for r, c in pairs:
+        if t_hap[r] and a_hap[c] and t_hap[r] != a_hap[c]:
+            print(f'  cruce: {t2t_full[t2t_order[r]]} -> {asm_order[c]}',
+                  file=sys.stderr)
+
+
+if __name__ == '__main__':
+    main()
