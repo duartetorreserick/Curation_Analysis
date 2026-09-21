@@ -19,7 +19,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BASE="$(cd "$SCRIPT_DIR/../.." && pwd)"
+BASE="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
 # Conda environment / python executable
 if command -v conda &>/dev/null && conda env list | grep -q "^ds "; then
@@ -37,11 +37,12 @@ ANNOT="$BASE/data/annotations/annotation_HiFi_ONT.tsv"
 
 # Output Paths
 OUTDIR="$BASE/results/figures"
-STATS_DIR="$BASE/results/stats"
+STATS_DIR="$OUTDIR/stats"
 mkdir -p "$OUTDIR" "$STATS_DIR"
 
-STATS_PREFIX="$STATS_DIR/bTaeGut7_stats_by_category_updated_categories"
-OUT="$OUTDIR/bTaeGut7_combined_boxplot_v2_updated_categories_panelg"
+DATE=$(date +%Y%m%d)
+STATS_PREFIX="$STATS_DIR/bTaeGut7_stats_by_category_updated_categories_${DATE}"
+OUT="$OUTDIR/bTaeGut7_combined_boxplot_v2_updated_categories_panelg_${DATE}"
 
 # =============================================================================
 # Step 1 — Regenerate per-category stats TSV with updated classification
@@ -49,7 +50,7 @@ OUT="$OUTDIR/bTaeGut7_combined_boxplot_v2_updated_categories_panelg"
 echo "========================================================================"
 echo "Step 1: Regenerating stats TSV with updated categories"
 echo "========================================================================"
-$PYTHON "$SCRIPT_DIR/summarize_stats_by_category_v2.py" \
+$PYTHON "$BASE/scripts/10_figures/10_figures_supp/summarize_stats_by_category.py" \
   --single-tsv          "$BASE/results/single/03_coverage_single/chain_cov.target_cov.tsv" \
   --dual-tsv            "$BASE/results/dual/03_coverage_dual/chain_cov.target_cov.tsv" \
   --single-chain        "$BASE/results/single/02_chainpipeline_single/t2t.vs.single.T2T.vs.ASM.target.collinear.chain" \
@@ -75,7 +76,7 @@ $PYTHON "$SCRIPT_DIR/summarize_stats_by_category_v2.py" \
 echo "========================================================================"
 echo "Step 2: Plotting combined figure (Panels a–g)"
 echo "========================================================================"
-$PYTHON "$SCRIPT_DIR/plot_combined_figure_boxplot_v2_updated_categories_panelg.py" \
+$PYTHON "$SCRIPT_DIR/plot_combined_figure.py" \
   --single-tsv          "$BASE/results/single/03_coverage_single/chain_cov.target_cov.tsv" \
   --dual-tsv            "$BASE/results/dual/03_coverage_dual/chain_cov.target_cov.tsv" \
   --single-chain        "$BASE/results/single/02_chainpipeline_single/t2t.vs.single.T2T.vs.ASM.target.collinear.chain" \
@@ -90,12 +91,16 @@ $PYTHON "$SCRIPT_DIR/plot_combined_figure_boxplot_v2_updated_categories_panelg.p
   --dual-bed            "$BASE/results/dual/05_hapmers_dual/dual.switch_blocks.final.bed" \
   --ont-dual-chain      "$BASE/results/ont/02_chainpipeline_ont/t2t.vs.ont.T2T.vs.ASM.target.collinear.chain" \
   --ont-dual-nc-chain   "$BASE/results/ont/02_chainpipeline_ont/t2t.vs.ont.T2T.vs.ASM.target.non-collinear.chain" \
+  --ont-dual-pairs      "$BASE/results/ont/02_chainpipeline_ont/t2t.vs.ont.best_chrom_pairs.tsv" \
   --single-telomere-presence "$BASE/results/single/04_telomeres_single/single_telomere_presence.tsv" \
   --dual-telomere-presence   "$BASE/results/dual/04_telomeres_dual/dual_telomere_presence.tsv" \
   --ont-telomere-presence    "$BASE/results/ont/04_telomeres_ont/ont_telomere_presence.tsv" \
   --single-coverage-summary  "$BASE/results/single/03_coverage_single/single.coverage_summary.tsv" \
   --dual-coverage-summary    "$BASE/results/dual/03_coverage_dual/dual.coverage_summary.tsv" \
   --ont-coverage-summary     "$BASE/results/ont/03_coverage_ont/ont.coverage_summary.tsv" \
+  --single-annotated-gaps    "$BASE/results/single/06_gaps_single/single_combined.renamed.sorted.reoriented.annotated.gaps.bed" \
+  --dual-annotated-gaps      "$BASE/results/dual/06_gaps_dual/dual_combined.renamed.sorted.reoriented.annotated.gaps.bed" \
+  --ont-annotated-gaps       "$BASE/results/ont/06_gaps_ont/asm3_ONT_combined.sorted.reoriented.annotated.gaps.bed" \
   --telo-p-bed          "$PBED" \
   --centromeres         "$CEN" \
   --stats-tsv           "${STATS_PREFIX}_wide.tsv" \

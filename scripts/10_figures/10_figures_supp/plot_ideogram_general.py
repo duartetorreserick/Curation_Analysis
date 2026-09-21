@@ -399,7 +399,7 @@ def build_chain_query_liftover(chain_path):
             size = blk[0]; dt = blk[1] if len(blk) > 1 else 0; dq = blk[2] if len(blk) > 2 else 0
             qs = (q_size - (q_pos + size)) if q_strand == '-' else q_pos
             qe = (q_size - q_pos)          if q_strand == '-' else q_pos + size
-            liftover[hdr['qName']][hdr['tName']].append((qs, qe, t_pos))
+            liftover[hdr['qName']][hdr['tName']].append((qs, qe, t_pos, q_strand))
             t_pos += size + dt; q_pos += size + dq
 
     with open(chain_path) as fh:
@@ -429,46 +429,136 @@ def build_chain_query_liftover(chain_path):
             for qn, td in liftover.items()}
 
 
-def _lift_gap_start(gs, ge, chain_blocks):
-    """Lifts a gap position to T2T coordinates via chain blocks."""
-    for qs, qe, ts in chain_blocks:
-        if qs <= gs <= qe:
-            return ts + (gs - qs)
-    preceding = [(qs, qe, ts) for qs, qe, ts in chain_blocks if qe < gs]
-    if preceding:
-        qs, qe, ts = max(preceding, key=lambda x: x[1])
-        return ts + (qe - qs)
-    following = sorted([(qs, qe, ts) for qs, qe, ts in chain_blocks if qs > gs],
-                       key=lambda x: x[0])
-    if following:
-        return following[0][2]
-    return None
-
-
-def lift_gaps_to_t2t(gaps_raw, pairs_path, chain_path):
+def _map_gap_pos(gs, col_blks, nc_blks):
     """
-    Unified liftover for gaps from assembly coordinates to T2T coordinates.
-    gaps_raw keys are assembly sequence names (e.g. Pat_SUPER_2.H2) matching best_chrom_pairs.
-    Returns:
-      {t2t_name: [(t2t_start, t2t_end), ...]}
+    Lifts a gap coordinate gs to T2T coordinates using collinear and non-collinear blocks.
+    Prioritizes direct overlap with collinear blocks, then non-collinear blocks,
+    and finally clamps to the nearest flanking block boundary.
+    """
+    # 1. Direct overlap with collinear block
+    for blk in col_blks:
+        qs, qe, ts = blk[0], blk[1], blk[2]
+        strand = blk[3] if len(blk) > 3 else '+'
+        if qs <= gs <= qe:
+            return ts + (qe - gs if strand == '-' else gs - qs)
+    # 2. Direct overlap with non-collinear block
+    for blk in nc_blks:
+        qs, qe, ts = blk[0], blk[1], blk[2]
+        strand = blk[3] if len(blk) > 3 else '+'
+        if qs <= gs <= qe:
+            return ts + (qe - gs if strand == '-' else gs - qs)
+    # 3. Flanking/nearest block across all blocks
+    all_blks = col_blks + nc_blks
+    if not all_blks:
+        return None
+    preceding = [b for b in all_blks if b[1] < gs]
+    following = [b for b in all_blks if b[0] > gs]
+    b_prec = max(preceding, key=lambda x: x[1]) if preceding else None
+    b_foll = min(following, key=lambda x: x[0]) if following else None
+    if b_prec and b_foll:
+        d_p = gs - b_prec[1]
+        d_f = b_foll[0] - gs
+        chosen = b_prec if d_p <= d_f else b_foll
+        chosen_edge = 'end' if d_p <= d_f else 'start'
+    elif b_prec:
+        chosen = b_prec; chosen_edge = 'end'
+    elif b_foll:
+        chosen = b_foll; chosen_edge = 'start'
+    else:
+        return None
+    qs, qe, ts = chosen[0], chosen[1], chosen[2]
+    strand = chosen[3] if len(chosen) > 3 else '+'
+    if chosen_edge == 'end':
+        return ts if strand == '-' else ts + (qe - qs)
+    else:
+        return ts + (qe - qs) if strand == '-' else ts
+
+
+def separate_curation_gaps(positions, min_sep=350_000, chrom_size=None):
+    """
+    Separates curation gaps that map to identical or near-identical coordinates
+    (e.g., due to falling within unaligned/introduced contigs that clamped to the
+    same flanking chain block). Centers clusters around their anchor point and
+    ensures adjacent gaps are separated by at least min_sep so introduced sequences
+    are clearly distinguishable.
+    """
+    if not positions:
+        return []
+    sorted_items = sorted(positions, key=lambda x: (x[1], x[0]))
+
+    clusters = []
+    curr_cluster = [sorted_items[0]]
+    for item in sorted_items[1:]:
+        if item[1] - curr_cluster[-1][1] < min_sep:
+            curr_cluster.append(item)
+        else:
+            clusters.append(curr_cluster)
+            curr_cluster = [item]
+    clusters.append(curr_cluster)
+
+    adjusted = []
+    for cl in clusters:
+        k = len(cl)
+        if k == 1:
+            adjusted.append(cl[0][1])
+        else:
+            center = sum(x[1] for x in cl) / k
+            span = (k - 1) * min_sep
+            start = center - span / 2
+            for i in range(k):
+                adjusted.append(int(start + i * min_sep))
+
+    for i in range(1, len(adjusted)):
+        if adjusted[i] < adjusted[i-1] + min_sep:
+            adjusted[i] = adjusted[i-1] + min_sep
+    if chrom_size and adjusted[-1] > chrom_size:
+        shift = adjusted[-1] - chrom_size
+        adjusted = [max(0, p - shift) for p in adjusted]
+    for i in range(len(adjusted)-2, -1, -1):
+        if adjusted[i] > adjusted[i+1] - min_sep:
+            adjusted[i] = max(0, adjusted[i+1] - min_sep)
+
+    return adjusted
+
+
+def lift_gaps_to_t2t(gaps_raw, pairs_path, chain_path, nc_chain_path=None, seq_sizes=None, is_curation=False):
+    """
+    Unified liftover for gaps from assembly coordinates to T2T coordinates,
+    supporting both collinear and non-collinear chain alignments.
+    When is_curation=True, separates clustered curation gaps so introduced sequences
+    are clearly distinguishable.
     """
     if not gaps_raw or not pairs_path or not chain_path:
         return {}
     pairs = load_chrom_pairs(pairs_path)
     super_to_t2t = {v: k for k, v in pairs.items()}
-    liftover = build_chain_query_liftover(chain_path)
+    liftover_col = build_chain_query_liftover(chain_path)
+    liftover_nc  = build_chain_query_liftover(nc_chain_path) if nc_chain_path else {}
 
     result = defaultdict(list)
     for super_name, intervals in gaps_raw.items():
         t2t_name = super_to_t2t.get(super_name)
         if not t2t_name:
             continue
-        chain_blocks = liftover.get(super_name, {}).get(t2t_name, [])
-        if not chain_blocks:
+        col_blocks = liftover_col.get(super_name, {}).get(t2t_name, [])
+        nc_blocks  = liftover_nc.get(super_name, {}).get(t2t_name, [])
+        if not col_blocks and not nc_blocks:
             continue
+        mapped = []
         for gs, ge in intervals:
-            pos = _lift_gap_start(gs, ge, chain_blocks)
+            pos = _map_gap_pos(gs, col_blocks, nc_blocks)
             if pos is not None:
+                mapped.append((gs, pos))
+        if not mapped:
+            continue
+        if is_curation:
+            sz = seq_sizes.get(t2t_name) if seq_sizes else None
+            min_sep = max(int(sz * 0.005), 80_000) if sz else 350_000
+            sep_positions = separate_curation_gaps(mapped, min_sep=min_sep, chrom_size=sz)
+            for pos in sep_positions:
+                result[t2t_name].append((pos - 50, pos + 50))
+        else:
+            for _, pos in mapped:
                 result[t2t_name].append((pos - 50, pos + 50))
     return dict(result)
 
@@ -482,17 +572,22 @@ def liftover_blocks(raw_blocks, chain_liftover, scaffold_name, t2t_name):
         return []
     result = []
     for h_start, h_end, _ in raw_blocks:
-        overlapping = [(qs, qe, ts) for qs, qe, ts in chain_blocks
-                       if max(h_start, qs) < min(h_end, qe)]
+        overlapping = [blk for blk in chain_blocks
+                       if max(h_start, blk[0]) < min(h_end, blk[1])]
         if not overlapping:
             continue
         first_qs = overlapping[0][0];  last_qe = overlapping[-1][1]
         if h_start < first_qs - _CHAIN_EDGE_TOLERANCE or h_end > last_qe + _CHAIN_EDGE_TOLERANCE:
             continue
         ivs = []
-        for qs, qe, ts in overlapping:
+        for blk in overlapping:
+            qs, qe, ts = blk[0], blk[1], blk[2]
+            strand = blk[3] if len(blk) > 3 else '+'
             ov_s = max(h_start, qs);  ov_e = min(h_end, qe)
-            p_s  = ts + (ov_s - qs);  p_e  = ts + (ov_e - qs)
+            if strand == '-':
+                p_s  = ts + (qe - ov_e);  p_e  = ts + (qe - ov_s)
+            else:
+                p_s  = ts + (ov_s - qs);  p_e  = ts + (ov_e - qs)
             if p_s < p_e:
                 ivs.append((p_s, p_e))
         if not ivs:
@@ -873,29 +968,28 @@ def _draw_haplotype_panel(ax, fig_w, fig_h,
                     r.set_clip_path(chrom_p, transform=ax.transData)
                     ax.add_patch(r)
 
+        cur_gap_lw = max(0.8, st['border_lw'] * 1.8)
+        asm_gap_lw = max(0.5, st['border_lw'] * 1.2)
+
         if gaps_asm_:
             for gps, gpe in gaps_asm_.get(nm, []):
                 if flip:
                     gps, gpe = size - gpe, size - gps
                 mid_g = (gps + gpe) / 2
-                ax.plot([mid_g, mid_g], [yc - h, yc + h],
-                        color=COL_ASM_GAP, lw=0.5, zorder=7,
-                        solid_capstyle='butt', clip_on=True)
+                line, = ax.plot([mid_g, mid_g], [yc - h, yc + h],
+                                color=COL_ASM_GAP, lw=asm_gap_lw, zorder=8,
+                                solid_capstyle='butt', clip_on=True)
+                line.set_clip_path(chrom_p, transform=ax.transData)
 
         if gaps_:
-            gap_ivs = gaps_.get(nm, [])
-            min_gap_w = max_size * 0.004
-            for gps, gpe in gap_ivs:
+            for gps, gpe in gaps_.get(nm, []):
                 if flip:
                     gps, gpe = size - gpe, size - gps
-                gw = max(gpe - gps, min_gap_w)
                 mid_g = (gps + gpe) / 2
-                gs_d = max(0, mid_g - gw / 2)
-                ge_d = min(size, mid_g + gw / 2)
-                r = mpatches.Rectangle((gs_d, yc - h), ge_d - gs_d, BAR_H,
-                                       fc=COL_GAP, ec='none', alpha=0.9, zorder=8)
-                r.set_clip_path(chrom_p, transform=ax.transData)
-                ax.add_patch(r)
+                line, = ax.plot([mid_g, mid_g], [yc - h, yc + h],
+                                color=COL_GAP, lw=cur_gap_lw, zorder=9,
+                                solid_capstyle='butt', clip_on=True)
+                line.set_clip_path(chrom_p, transform=ax.transData)
 
         ax.add_patch(PathPatch(chrom_p, fc='none', ec=COL_BORDER,
                                lw=st['border_lw'], zorder=13))
@@ -1202,7 +1296,7 @@ def build_haplotype_figure(df_s, df_d,
         mpatches.Patch(fc=COL_COV_D,      ec='none', alpha=0.80, label='Dual — non-collinear'),
         mpatches.Patch(fc=COL_COV_O,      ec='none', alpha=0.80, label='ONT Dual — non-collinear'),
         mpatches.Patch(fc=COL_SW,         ec='none',             label='Hap. switch'),
-        mpatches.Patch(fc=COL_GAP,        ec='none', alpha=0.9,  label='Curation gap'),
+        Line2D([0], [0], color=COL_GAP, lw=1.5,                  label='Curation gap'),
         Line2D([0], [0], color=COL_ASM_GAP, lw=1.2,              label='Assembly gap'),
         mpatches.Patch(fc=COL_BORDER, ec=COL_BORDER, lw=0.5,    label='Centromere'),
         _telo_coll, _telo_nc,
@@ -1312,12 +1406,19 @@ def main():
     parser.add_argument('--dpi',       type=int, default=None)
     parser.add_argument('--rasterize', action='store_true')
     parser.add_argument('--simplify',  action='store_true')
+    parser.add_argument('--datestamp', action='store_true',
+                        help='Append YYYYMMDD datestamp to output filename')
 
     args = parser.parse_args()
 
     out = args.output
     if not out.endswith(f'.{args.format}'):
         out = f'{out}.{args.format}'
+    if args.datestamp:
+        base, ext = os.path.splitext(out)
+        today = datetime.now().strftime("%Y%m%d")
+        if not base.endswith(today):
+            out = f'{base}_{today}{ext}'
 
     print('Loading sequence sizes from TSVs...')
     df_s = load_tsv(args.single_tsv)
@@ -1397,22 +1498,22 @@ def main():
     gaps_single_asm = gaps_single = None
     if args.single_annotated_gaps:
         asm_s, cur_s = load_annotated_gaps_bed(args.single_annotated_gaps)
-        gaps_single_asm = lift_gaps_to_t2t(asm_s, args.single_pairs, args.single_chain)
-        gaps_single     = lift_gaps_to_t2t(cur_s, args.single_pairs, args.single_chain)
+        gaps_single_asm = lift_gaps_to_t2t(asm_s, args.single_pairs, args.single_chain, args.single_nc_chain, seq_sizes=seq_sizes, is_curation=False)
+        gaps_single     = lift_gaps_to_t2t(cur_s, args.single_pairs, args.single_chain, args.single_nc_chain, seq_sizes=seq_sizes, is_curation=True)
         print(f'  Single: {sum(len(v) for v in gaps_single.values())} curation, {sum(len(v) for v in gaps_single_asm.values())} assembly gaps lifted.')
 
     gaps_dual_asm = gaps_dual = None
     if args.dual_annotated_gaps:
         asm_d, cur_d = load_annotated_gaps_bed(args.dual_annotated_gaps)
-        gaps_dual_asm = lift_gaps_to_t2t(asm_d, args.dual_pairs, args.dual_chain)
-        gaps_dual     = lift_gaps_to_t2t(cur_d, args.dual_pairs, args.dual_chain)
+        gaps_dual_asm = lift_gaps_to_t2t(asm_d, args.dual_pairs, args.dual_chain, args.dual_nc_chain, seq_sizes=seq_sizes, is_curation=False)
+        gaps_dual     = lift_gaps_to_t2t(cur_d, args.dual_pairs, args.dual_chain, args.dual_nc_chain, seq_sizes=seq_sizes, is_curation=True)
         print(f'  Dual: {sum(len(v) for v in gaps_dual.values())} curation, {sum(len(v) for v in gaps_dual_asm.values())} assembly gaps lifted.')
 
     gaps_ont_asm = gaps_ont = None
     if args.ont_annotated_gaps:
         asm_o, cur_o = load_annotated_gaps_bed(args.ont_annotated_gaps)
-        gaps_ont_asm = lift_gaps_to_t2t(asm_o, args.ont_dual_pairs, args.ont_dual_chain)
-        gaps_ont     = lift_gaps_to_t2t(cur_o, args.ont_dual_pairs, args.ont_dual_chain)
+        gaps_ont_asm = lift_gaps_to_t2t(asm_o, args.ont_dual_pairs, args.ont_dual_chain, args.ont_dual_nc_chain, seq_sizes=seq_sizes, is_curation=False)
+        gaps_ont     = lift_gaps_to_t2t(cur_o, args.ont_dual_pairs, args.ont_dual_chain, args.ont_dual_nc_chain, seq_sizes=seq_sizes, is_curation=True)
         print(f'  ONT: {sum(len(v) for v in gaps_ont.values())} curation, {sum(len(v) for v in gaps_ont_asm.values())} assembly gaps lifted.')
 
     dpi = args.dpi or STYLES.get(args.style, STYLES['paper'])['dpi_default']

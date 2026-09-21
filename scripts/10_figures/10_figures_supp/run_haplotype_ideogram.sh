@@ -10,14 +10,14 @@ set -euo pipefail
 # ==============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BASE="$(cd "$SCRIPT_DIR/../.." && pwd)"
+BASE="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
 PYTHON="/lustre/fs5/vgl/scratch/eduarte/miniconda3/envs/ds/bin/python3"
 if [[ ! -x "$PYTHON" ]]; then
     PYTHON="python3"
 fi
 
-PLOT_SCRIPT="$SCRIPT_DIR/plot_ideogram_haplotype_avgcov_v6.py"
+PLOT_SCRIPT="$SCRIPT_DIR/plot_ideogram_general.py"
 
 # Data & Reference
 CEN="$BASE/data/t2t/bTaeGut7v0.4_MT_rDNA.centromere_detector.v0.1.gff"
@@ -57,9 +57,11 @@ O_TELO="$O_DIR/04_telomeres_ont/ont_telomere_presence.tsv"
 O_COV_SUM="$O_DIR/03_coverage_ont/ont.coverage_summary.tsv"
 O_GAPS="$O_DIR/06_gaps_ont/asm3_ONT_combined.sorted.reoriented.annotated.gaps.bed"
 
-# Output directory
+# Output directory and datestamp
 OUT_DIR="$BASE/results/figures"
 mkdir -p "$OUT_DIR"
+DATE="${1:-${DATE:-$(date +%Y%m%d)}}"
+OUT_BASE="$OUT_DIR/bTaeGut7_haplotype_ideogram_paper_${DATE}"
 
 echo "=== Generating Paper Butterfly Ideogram (PNG, 300 DPI) ==="
 "$PYTHON" "$PLOT_SCRIPT" \
@@ -94,7 +96,8 @@ echo "=== Generating Paper Butterfly Ideogram (PNG, 300 DPI) ==="
     --style paper \
     --format png \
     --dpi 300 \
-    --output "$OUT_DIR/bTaeGut7_haplotype_ideogram_paper.png"
+    --simplify \
+    --output "${OUT_BASE}.png"
 
 echo "=== Generating Paper Butterfly Ideogram (PDF) ==="
 "$PYTHON" "$PLOT_SCRIPT" \
@@ -128,6 +131,9 @@ echo "=== Generating Paper Butterfly Ideogram (PDF) ==="
     --layout butterfly \
     --style paper \
     --format pdf \
-    --output "$OUT_DIR/bTaeGut7_haplotype_ideogram_paper.pdf"
+    --simplify \
+    --output "${OUT_BASE}.pdf"
 
 echo "=== Finished! Figures located in $OUT_DIR ==="
+echo "  PNG: ${OUT_BASE}.png"
+echo "  PDF: ${OUT_BASE}.pdf"

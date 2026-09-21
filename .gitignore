@@ -2,3 +2,7 @@
 *data
 *results
 *slurm*
+*_pycache_*
+*Docker*
+*docker*
+*.yml*

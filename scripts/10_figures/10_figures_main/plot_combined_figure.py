@@ -428,7 +428,7 @@ def build_chain_query_liftover(chain_path):
             size = blk[0]; dt = blk[1] if len(blk) > 1 else 0; dq = blk[2] if len(blk) > 2 else 0
             qs = (q_size - (q_pos + size)) if q_strand == '-' else q_pos
             qe = (q_size - q_pos)          if q_strand == '-' else q_pos + size
-            liftover[hdr['qName']][hdr['tName']].append((qs, qe, t_pos))
+            liftover[hdr['qName']][hdr['tName']].append((qs, qe, t_pos, q_strand))
             t_pos += size + dt; q_pos += size + dq
 
     with open(chain_path) as fh:
@@ -464,8 +464,8 @@ def liftover_blocks(raw_blocks, chain_liftover, scaffold_name, t2t_name):
         return []
     result = []
     for h_start, h_end, _ in raw_blocks:
-        overlapping = [(qs, qe, ts) for qs, qe, ts in chain_blocks
-                       if max(h_start, qs) < min(h_end, qe)]
+        overlapping = [blk for blk in chain_blocks
+                       if max(h_start, blk[0]) < min(h_end, blk[1])]
         if not overlapping:
             continue
         first_qs = overlapping[0][0];  last_qe = overlapping[-1][1]
@@ -476,9 +476,14 @@ def liftover_blocks(raw_blocks, chain_liftover, scaffold_name, t2t_name):
         # Project each overlapping chain block; merge runs within 50 kb,
         # split at large T2T gaps (e.g. T2T insertions relative to scaffold)
         ivs = []
-        for qs, qe, ts in overlapping:
+        for blk in overlapping:
+            qs, qe, ts = blk[0], blk[1], blk[2]
+            strand = blk[3] if len(blk) > 3 else '+'
             ov_s = max(h_start, qs);  ov_e = min(h_end, qe)
-            p_s  = ts + (ov_s - qs);  p_e  = ts + (ov_e - qs)
+            if strand == '-':
+                p_s  = ts + (qe - ov_e);  p_e  = ts + (qe - ov_s)
+            else:
+                p_s  = ts + (ov_s - qs);  p_e  = ts + (ov_e - qs)
             if p_s < p_e:
                 ivs.append((p_s, p_e))
         if not ivs:
@@ -531,46 +536,136 @@ def load_annotated_gaps_bed(path):
     return dict(assembly), dict(curation)
 
 
-def _lift_gap_start(gs, ge, chain_blocks):
-    """Lifts a gap position to T2T coordinates via chain blocks."""
-    for qs, qe, ts in chain_blocks:
-        if qs <= gs <= qe:
-            return ts + (gs - qs)
-    preceding = [(qs, qe, ts) for qs, qe, ts in chain_blocks if qe < gs]
-    if preceding:
-        qs, qe, ts = max(preceding, key=lambda x: x[1])
-        return ts + (qe - qs)
-    following = sorted([(qs, qe, ts) for qs, qe, ts in chain_blocks if qs > gs],
-                       key=lambda x: x[0])
-    if following:
-        return following[0][2]
-    return None
-
-
-def lift_gaps_to_t2t(gaps_raw, pairs_path, chain_path):
+def _map_gap_pos(gs, col_blks, nc_blks):
     """
-    Unified liftover for gaps from assembly coordinates to T2T coordinates.
-    gaps_raw keys are assembly sequence names (e.g. Pat_SUPER_2.H2) matching best_chrom_pairs.
-    Returns:
-      {t2t_name: [(t2t_start, t2t_end), ...]}
+    Lifts a gap coordinate gs to T2T coordinates using collinear and non-collinear blocks.
+    Prioritizes direct overlap with collinear blocks, then non-collinear blocks,
+    and finally clamps to the nearest flanking block boundary.
+    """
+    # 1. Direct overlap with collinear block
+    for blk in col_blks:
+        qs, qe, ts = blk[0], blk[1], blk[2]
+        strand = blk[3] if len(blk) > 3 else '+'
+        if qs <= gs <= qe:
+            return ts + (qe - gs if strand == '-' else gs - qs)
+    # 2. Direct overlap with non-collinear block
+    for blk in nc_blks:
+        qs, qe, ts = blk[0], blk[1], blk[2]
+        strand = blk[3] if len(blk) > 3 else '+'
+        if qs <= gs <= qe:
+            return ts + (qe - gs if strand == '-' else gs - qs)
+    # 3. Flanking/nearest block across all blocks
+    all_blks = col_blks + nc_blks
+    if not all_blks:
+        return None
+    preceding = [b for b in all_blks if b[1] < gs]
+    following = [b for b in all_blks if b[0] > gs]
+    b_prec = max(preceding, key=lambda x: x[1]) if preceding else None
+    b_foll = min(following, key=lambda x: x[0]) if following else None
+    if b_prec and b_foll:
+        d_p = gs - b_prec[1]
+        d_f = b_foll[0] - gs
+        chosen = b_prec if d_p <= d_f else b_foll
+        chosen_edge = 'end' if d_p <= d_f else 'start'
+    elif b_prec:
+        chosen = b_prec; chosen_edge = 'end'
+    elif b_foll:
+        chosen = b_foll; chosen_edge = 'start'
+    else:
+        return None
+    qs, qe, ts = chosen[0], chosen[1], chosen[2]
+    strand = chosen[3] if len(chosen) > 3 else '+'
+    if chosen_edge == 'end':
+        return ts if strand == '-' else ts + (qe - qs)
+    else:
+        return ts + (qe - qs) if strand == '-' else ts
+
+
+def separate_curation_gaps(positions, min_sep=350_000, chrom_size=None):
+    """
+    Separates curation gaps that map to identical or near-identical coordinates
+    (e.g., due to falling within unaligned/introduced contigs that clamped to the
+    same flanking chain block). Centers clusters around their anchor point and
+    ensures adjacent gaps are separated by at least min_sep so introduced sequences
+    are clearly distinguishable.
+    """
+    if not positions:
+        return []
+    sorted_items = sorted(positions, key=lambda x: (x[1], x[0]))
+
+    clusters = []
+    curr_cluster = [sorted_items[0]]
+    for item in sorted_items[1:]:
+        if item[1] - curr_cluster[-1][1] < min_sep:
+            curr_cluster.append(item)
+        else:
+            clusters.append(curr_cluster)
+            curr_cluster = [item]
+    clusters.append(curr_cluster)
+
+    adjusted = []
+    for cl in clusters:
+        k = len(cl)
+        if k == 1:
+            adjusted.append(cl[0][1])
+        else:
+            center = sum(x[1] for x in cl) / k
+            span = (k - 1) * min_sep
+            start = center - span / 2
+            for i in range(k):
+                adjusted.append(int(start + i * min_sep))
+
+    for i in range(1, len(adjusted)):
+        if adjusted[i] < adjusted[i-1] + min_sep:
+            adjusted[i] = adjusted[i-1] + min_sep
+    if chrom_size and adjusted[-1] > chrom_size:
+        shift = adjusted[-1] - chrom_size
+        adjusted = [max(0, p - shift) for p in adjusted]
+    for i in range(len(adjusted)-2, -1, -1):
+        if adjusted[i] > adjusted[i+1] - min_sep:
+            adjusted[i] = max(0, adjusted[i+1] - min_sep)
+
+    return adjusted
+
+
+def lift_gaps_to_t2t(gaps_raw, pairs_path, chain_path, nc_chain_path=None, seq_sizes=None, is_curation=False):
+    """
+    Unified liftover for gaps from assembly coordinates to T2T coordinates,
+    supporting both collinear and non-collinear chain alignments.
+    When is_curation=True, separates clustered curation gaps so introduced sequences
+    are clearly distinguishable.
     """
     if not gaps_raw or not pairs_path or not chain_path:
         return {}
     pairs = load_chrom_pairs(pairs_path)
     super_to_t2t = {v: k for k, v in pairs.items()}
-    liftover = build_chain_query_liftover(chain_path)
+    liftover_col = build_chain_query_liftover(chain_path)
+    liftover_nc  = build_chain_query_liftover(nc_chain_path) if nc_chain_path else {}
 
     result = defaultdict(list)
     for super_name, intervals in gaps_raw.items():
         t2t_name = super_to_t2t.get(super_name)
         if not t2t_name:
             continue
-        chain_blocks = liftover.get(super_name, {}).get(t2t_name, [])
-        if not chain_blocks:
+        col_blocks = liftover_col.get(super_name, {}).get(t2t_name, [])
+        nc_blocks  = liftover_nc.get(super_name, {}).get(t2t_name, [])
+        if not col_blocks and not nc_blocks:
             continue
+        mapped = []
         for gs, ge in intervals:
-            pos = _lift_gap_start(gs, ge, chain_blocks)
+            pos = _map_gap_pos(gs, col_blocks, nc_blocks)
             if pos is not None:
+                mapped.append((gs, pos))
+        if not mapped:
+            continue
+        if is_curation:
+            sz = seq_sizes.get(t2t_name) if seq_sizes else None
+            min_sep = max(int(sz * 0.005), 80_000) if sz else 350_000
+            sep_positions = separate_curation_gaps(mapped, min_sep=min_sep, chrom_size=sz)
+            for pos in sep_positions:
+                result[t2t_name].append((pos - 50, pos + 50))
+        else:
+            for _, pos in mapped:
                 result[t2t_name].append((pos - 50, pos + 50))
     return dict(result)
 
@@ -863,25 +958,28 @@ def _draw_haplotype_panel(ax, fig_w, fig_h,
                     r.set_clip_path(chrom_p, transform=ax.transData)
                     ax.add_patch(r)
 
+        cur_gap_lw = max(0.8, st['border_lw'] * 1.8)
+        asm_gap_lw = max(0.5, st['border_lw'] * 1.2)
+
         if gaps_asm_:
             for gps, gpe in gaps_asm_.get(nm, []):
                 if flip:
                     gps, gpe = size - gpe, size - gps
-                ax.plot([gps, gps], [yc - h, yc + h],
-                        color=COL_ASM_GAP, lw=0.6, zorder=8,
-                        solid_capstyle='butt')
+                mid_g = (gps + gpe) / 2
+                line, = ax.plot([mid_g, mid_g], [yc - h, yc + h],
+                                color=COL_ASM_GAP, lw=asm_gap_lw, zorder=8,
+                                solid_capstyle='butt', clip_on=True)
+                line.set_clip_path(chrom_p, transform=ax.transData)
 
         if gaps_:
-            gap_ivs = gaps_.get(nm, [])
-            min_gap_w = max_size * 0.004
-            for gps, gpe in gap_ivs:
+            for gps, gpe in gaps_.get(nm, []):
                 if flip:
                     gps, gpe = size - gpe, size - gps
-                gw = max(gpe - gps, min_gap_w)
-                rect = mpatches.Rectangle((gps, yc - h), gw, BAR_H,
-                                          fc=COL_GAP, ec='none', alpha=0.9, zorder=9)
-                rect.set_clip_path(chrom_p, transform=ax.transData)
-                ax.add_patch(rect)
+                mid_g = (gps + gpe) / 2
+                line, = ax.plot([mid_g, mid_g], [yc - h, yc + h],
+                                color=COL_GAP, lw=cur_gap_lw, zorder=9,
+                                solid_capstyle='butt', clip_on=True)
+                line.set_clip_path(chrom_p, transform=ax.transData)
 
         ax.add_patch(PathPatch(chrom_p, fc='none', ec=COL_BORDER,
                                lw=st['border_lw'], zorder=13))
@@ -1794,7 +1892,10 @@ def build_combined_figure(df_s, df_d,
                            simplify=False,
                            centromeres=None,
                            flip_set=None,
-                           annotation_df=None):
+                           annotation_df=None,
+                           gaps_single=None, gaps_single_asm=None,
+                           gaps_dual=None, gaps_dual_asm=None,
+                           gaps_ont=None, gaps_ont_asm=None):
 
     # ---- Chromosome ordering ------------------------------------------------
     all_names = sorted(
@@ -1961,13 +2062,19 @@ def build_combined_figure(df_s, df_d,
         ax_g_right = fig.add_subplot(inner_g[0, 3])   # Premature stop codons
         ax_g_pcg   = fig.add_subplot(inner_g[0, 5])   # Protein-coding genes
 
-    # ---- Common ONT kwargs --------------------------------------------------
+    # ---- Common ONT and Gap kwargs -----------------------------------------
     _common_ont = dict(
         yp_ont=None,
         cov_ont=cov_ont,
         nc_cov_ont=nc_cov_ont,
         telo_ont=telo_ont,
         telo_nc_ont=telo_nc_ont,
+        gaps_s=gaps_single,
+        gaps_s_asm=gaps_single_asm,
+        gaps_d=gaps_dual,
+        gaps_d_asm=gaps_dual_asm,
+        gaps_ont=gaps_ont,
+        gaps_ont_asm=gaps_ont_asm,
     )
 
     # ---- Draw Panel D — maternal (W, mirrored) ------------------------------
@@ -2217,6 +2324,10 @@ def main():
                         help='Wide-form TSV from summarize_stats_by_category.py (for panels e/f)')
     parser.add_argument('--annotation-tsv',           required=False, metavar='FILE', default=None,
                         help='Gene-model error rates TSV (for panel g)')
+    parser.add_argument('--ont-dual-pairs',        required=False, metavar='FILE', default=None)
+    parser.add_argument('--single-annotated-gaps', required=False, metavar='FILE', default=None)
+    parser.add_argument('--dual-annotated-gaps',   required=False, metavar='FILE', default=None)
+    parser.add_argument('--ont-annotated-gaps',    required=False, metavar='FILE', default=None)
     parser.add_argument('--output',                   required=True,  metavar='FILE')
     parser.add_argument('--no-timestamp',             action='store_true',
                         help='Do not append timestamp to output filename')
@@ -2274,6 +2385,28 @@ def main():
                                    args.single_fai,   args.single_chain)
     switch_d = build_switch_lookup(args.dual_pairs,   args.dual_bed,
                                    args.dual_fai,     args.dual_chain)
+
+    gaps_single = gaps_single_asm = None
+    if args.single_annotated_gaps and os.path.exists(args.single_annotated_gaps):
+        print('Loading Single annotated gaps...')
+        asm_raw, cur_raw = load_annotated_gaps_bed(args.single_annotated_gaps)
+        gaps_single_asm = lift_gaps_to_t2t(asm_raw, args.single_pairs, args.single_chain, args.single_nc_chain, seq_sizes=seq_sizes, is_curation=False)
+        gaps_single     = lift_gaps_to_t2t(cur_raw, args.single_pairs, args.single_chain, args.single_nc_chain, seq_sizes=seq_sizes, is_curation=True)
+
+    gaps_dual = gaps_dual_asm = None
+    if args.dual_annotated_gaps and os.path.exists(args.dual_annotated_gaps):
+        print('Loading Dual annotated gaps...')
+        asm_raw, cur_raw = load_annotated_gaps_bed(args.dual_annotated_gaps)
+        gaps_dual_asm = lift_gaps_to_t2t(asm_raw, args.dual_pairs, args.dual_chain, args.dual_nc_chain, seq_sizes=seq_sizes, is_curation=False)
+        gaps_dual     = lift_gaps_to_t2t(cur_raw, args.dual_pairs, args.dual_chain, args.dual_nc_chain, seq_sizes=seq_sizes, is_curation=True)
+
+    gaps_ont = gaps_ont_asm = None
+    if args.ont_annotated_gaps and os.path.exists(args.ont_annotated_gaps):
+        print('Loading ONT annotated gaps...')
+        asm_raw, cur_raw = load_annotated_gaps_bed(args.ont_annotated_gaps)
+        ont_pairs = args.ont_dual_pairs or args.dual_pairs
+        gaps_ont_asm = lift_gaps_to_t2t(asm_raw, ont_pairs, args.ont_dual_chain, args.ont_dual_nc_chain, seq_sizes=seq_sizes, is_curation=False)
+        gaps_ont     = lift_gaps_to_t2t(cur_raw, ont_pairs, args.ont_dual_chain, args.ont_dual_nc_chain, seq_sizes=seq_sizes, is_curation=True)
 
     telo_s = telo_d = telo_nc_s = telo_nc_d = None
     if args.single_telomere_presence and os.path.exists(args.single_telomere_presence):
@@ -2353,7 +2486,13 @@ def main():
                           simplify=args.simplify,
                           centromeres=centromeres,
                           flip_set=flip_set,
-                          annotation_df=annotation_df)
+                          annotation_df=annotation_df,
+                          gaps_single=gaps_single,
+                          gaps_single_asm=gaps_single_asm,
+                          gaps_dual=gaps_dual,
+                          gaps_dual_asm=gaps_dual_asm,
+                          gaps_ont=gaps_ont,
+                          gaps_ont_asm=gaps_ont_asm)
     print('Done.')
 
 
