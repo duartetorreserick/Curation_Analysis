@@ -60,6 +60,7 @@ MACRO_TOKENS = ['1', '1A', '2', '3', '4', '4A', '5', '6', '7', '8', 'ZW']
 
 INSERTION_GAP_THRESHOLD = 20_000   # 20 kb gap in query (dq) splits collinear ribbon
 UNLINKED_MIN_ALIGN_BP   = 20_000   # 20 kb minimum alignment to display unlinked scaffold
+MIN_NC_RIBBON_BP        = 20_000   # 20 kb minimum alignment to display non-collinear synteny ribbon
 
 # Palette
 COL_BORDER       = '#2c3e50'
@@ -291,9 +292,10 @@ def get_avg_cov_for_chrom(tok, cov_dict):
     return (avg_c, avg_nc, avg_u)
 
 
-def parse_chain_detailed(chain_path, is_collinear=True):
+def parse_chain_detailed(chain_path, is_collinear=True, min_nc_size=MIN_NC_RIBBON_BP):
     """
     Parses UCSC chain file into ribbons, splitting across query gaps (dq >= INSERTION_GAP_THRESHOLD).
+    Filters out spurious micro-alignments (< MIN_NC_RIBBON_BP) for non-collinear chains.
     Returns:
       ribbons: list of (t_name, t_start, t_end, q_name, q_start, q_end, strand, is_collinear)
       query_spans: dict of q_name -> list of (q_start, q_end)
@@ -305,6 +307,14 @@ def parse_chain_detailed(chain_path, is_collinear=True):
 
     if not chain_path or not os.path.exists(chain_path):
         return ribbons, query_spans, insertions
+
+    def _add_ribbon(t_n, ts, te, q_n, qs, qe, qstr):
+        if te <= ts or qe <= qs:
+            return
+        if not is_collinear and max(te - ts, qe - qs) < min_nc_size:
+            return
+        ribbons.append((t_n, ts, te, q_n, qs, qe, qstr, is_collinear))
+        query_spans[q_n].append((qs, qe))
 
     with open(chain_path) as f:
         t_name = q_name = q_strand = None
@@ -319,9 +329,8 @@ def parse_chain_detailed(chain_path, is_collinear=True):
             if not line or line.startswith('#'):
                 continue
             if line.startswith('chain'):
-                if in_ribbon and cur_t_end > cur_t_start and cur_q_end > cur_q_start:
-                    ribbons.append((t_name, cur_t_start, cur_t_end, q_name, cur_q_start, cur_q_end, q_strand, is_collinear))
-                    query_spans[q_name].append((cur_q_start, cur_q_end))
+                if in_ribbon:
+                    _add_ribbon(t_name, cur_t_start, cur_t_end, q_name, cur_q_start, cur_q_end, q_strand)
                 in_ribbon = False
 
                 parts = line.split()
@@ -362,14 +371,12 @@ def parse_chain_detailed(chain_path, is_collinear=True):
 
                 # If query gap is >= threshold, finish current ribbon and record insertion
                 if dq >= INSERTION_GAP_THRESHOLD and in_ribbon:
-                    ribbons.append((t_name, cur_t_start, cur_t_end, q_name, cur_q_start, cur_q_end, q_strand, is_collinear))
-                    query_spans[q_name].append((cur_q_start, cur_q_end))
+                    _add_ribbon(t_name, cur_t_start, cur_t_end, q_name, cur_q_start, cur_q_end, q_strand)
                     insertions[q_name].append((blk_q_e, blk_q_e + dq, dq, blk_t_e))
                     in_ribbon = False
 
-        if in_ribbon and cur_t_end > cur_t_start and cur_q_end > cur_q_start:
-            ribbons.append((t_name, cur_t_start, cur_t_end, q_name, cur_q_start, cur_q_end, q_strand, is_collinear))
-            query_spans[q_name].append((cur_q_start, cur_q_end))
+        if in_ribbon:
+            _add_ribbon(t_name, cur_t_start, cur_t_end, q_name, cur_q_start, cur_q_end, q_strand)
 
     return ribbons, query_spans, insertions
 
@@ -827,6 +834,8 @@ def plot_butterfly_macro(
                 for r in asm['nc_ribbons'].get(t2t_chrom, []):
                     _, ts, te, qn, qs, qe, qstr, _ = r
                     if qn not in offsets: continue
+                    if max(te - ts, abs(qe - qs)) < MIN_NC_RIBBON_BP:
+                        continue
                     q_off = offsets[qn]
                     q_len_cur = asm['sizes'].get(qn, q_prim_len)
 
