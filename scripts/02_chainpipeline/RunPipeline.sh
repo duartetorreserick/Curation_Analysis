@@ -83,6 +83,8 @@ done
 T2T_FA=$(realpath "$T2T_FA")
 ASM_FA=$(realpath "$ASM_FA")
 [[ -n "$USER_PAIRS" ]] && USER_PAIRS=$(realpath "$USER_PAIRS")
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+OUTDIR="${OUTDIR}_${TIMESTAMP}"
 mkdir -p "$OUTDIR"
 WORKDIR=$(realpath "$OUTDIR")
 LOGDIR="${WORKDIR}/logs"
@@ -342,7 +344,7 @@ export PATH='${ENV_UCSC}/bin:/usr/bin:/bin:/lustre/fs5/vgl/scratch/eduarte/minic
 cd '${WORKDIR}'
 
 echo '--- axtChain ---'
-axtChain -linearGap=medium -psl '${NAME}'.psl \
+axtChain -linearGap=strict -psl '${NAME}'.psl \
   '${T2T_BASE}'.2bit '${ASM_REOR_BASE}'.2bit '${NAME}'.chain
 chainSort '${NAME}'.chain '${NAME}'.sorted.chain
 
