@@ -57,13 +57,33 @@ O_TELO="$O_DIR/04_telomeres_ont/ont_telomere_presence.tsv"
 O_COV_SUM="$O_DIR/03_coverage_ont/ont.coverage_summary.tsv"
 O_GAPS="$O_DIR/06_gaps_ont/asm3_ONT_combined.sorted.reoriented.annotated.gaps.bed"
 
-# Output directory and datestamp
-OUT_DIR="$BASE/results/figures"
+# Output directory and timestamp
+OUT_DIR="$BASE/results/figures/10_figures_supp"
 mkdir -p "$OUT_DIR"
-DATE="${1:-${DATE:-$(date +%Y%m%d)}}"
-OUT_BASE="$OUT_DIR/bTaeGut7_haplotype_ideogram_paper_${DATE}"
 
-echo "=== Generating Paper Butterfly Ideogram (PNG, 300 DPI) ==="
+ARG1="${1:-}"
+ARG2="${2:-}"
+
+if [[ "$ARG1" == "optionA" || "$ARG1" == "optionB" || "$ARG1" == "none" ]]; then
+    TRACK="$ARG1"
+    TIMESTAMP="${ARG2:-$(date +%Y%m%d_%H%M%S)}"
+elif [[ "$ARG2" == "optionA" || "$ARG2" == "optionB" || "$ARG2" == "none" ]]; then
+    TIMESTAMP="${ARG1:-$(date +%Y%m%d_%H%M%S)}"
+    TRACK="$ARG2"
+else
+    TIMESTAMP="${ARG1:-$(date +%Y%m%d_%H%M%S)}"
+    TRACK="none"
+fi
+
+if [[ "$TRACK" != "none" ]]; then
+    OUT_BASE="$OUT_DIR/bTaeGut7_haplotype_ideogram_paper_${TRACK}_${TIMESTAMP}"
+    EXTRA_ARGS=(--insertion-track "$TRACK")
+else
+    OUT_BASE="$OUT_DIR/bTaeGut7_haplotype_ideogram_paper_${TIMESTAMP}"
+    EXTRA_ARGS=()
+fi
+
+echo "=== Generating Paper Butterfly Ideogram (PNG, 300 DPI, track=$TRACK) ==="
 "$PYTHON" "$PLOT_SCRIPT" \
     --single-tsv "$S_TSV" \
     --dual-tsv "$D_TSV" \
@@ -97,9 +117,10 @@ echo "=== Generating Paper Butterfly Ideogram (PNG, 300 DPI) ==="
     --format png \
     --dpi 300 \
     --simplify \
+    "${EXTRA_ARGS[@]}" \
     --output "${OUT_BASE}.png"
 
-echo "=== Generating Paper Butterfly Ideogram (PDF) ==="
+echo "=== Generating Paper Butterfly Ideogram (PDF, track=$TRACK) ==="
 "$PYTHON" "$PLOT_SCRIPT" \
     --single-tsv "$S_TSV" \
     --dual-tsv "$D_TSV" \
@@ -132,6 +153,7 @@ echo "=== Generating Paper Butterfly Ideogram (PDF) ==="
     --style paper \
     --format pdf \
     --simplify \
+    "${EXTRA_ARGS[@]}" \
     --output "${OUT_BASE}.pdf"
 
 echo "=== Finished! Figures located in $OUT_DIR ==="

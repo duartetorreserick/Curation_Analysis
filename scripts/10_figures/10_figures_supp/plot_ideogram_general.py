@@ -563,6 +563,118 @@ def lift_gaps_to_t2t(gaps_raw, pairs_path, chain_path, nc_chain_path=None, seq_s
     return dict(result)
 
 
+def extract_insertions_and_gaps(asm_gaps_raw, cur_gaps_raw, pairs_path, chain_path, nc_chain_path=None, seq_sizes=None, min_ins_size=30_000):
+    """
+    Extracts query insertions (dq >= min_ins_size) from collinear and non-collinear chains,
+    and classifies curation and assembly gaps into:
+      1. Aligned gaps (falling in aligned chain blocks) -> lifted to T2T coordinates.
+      2. Insertion gaps (falling inside query insertions) -> stored within their insertion event.
+    """
+    if not pairs_path or not chain_path:
+        return {}, {}, {}
+    pairs = load_chrom_pairs(pairs_path)
+    super_to_t2t = {v: k for k, v in pairs.items()}
+
+    def parse_chain_detailed(cp):
+        chains = {}
+        if not cp: return chains
+        with open(cp) as f:
+            hdr = None; blks = []
+            for line in f:
+                line = line.strip()
+                if line.startswith('chain'):
+                    if hdr: chains.setdefault((hdr['qName'], hdr['tName']), []).append((hdr, blks))
+                    p = line.split()
+                    hdr = {'tName': p[2], 'tStart': int(p[5]), 'tEnd': int(p[6]),
+                           'qName': p[7], 'qStart': int(p[10]), 'qEnd': int(p[11]),
+                           'strand': p[9]}
+                    blks = []
+                elif hdr and line and not line.startswith('#'):
+                    p = line.split()
+                    blks.append((int(p[0]), int(p[1]) if len(p)>1 else 0, int(p[2]) if len(p)>2 else 0))
+            if hdr: chains.setdefault((hdr['qName'], hdr['tName']), []).append((hdr, blks))
+        return chains
+
+    chains_col = parse_chain_detailed(chain_path)
+    chains_nc  = parse_chain_detailed(nc_chain_path) if nc_chain_path else {}
+    liftover_col = build_chain_query_liftover(chain_path)
+    liftover_nc  = build_chain_query_liftover(nc_chain_path) if nc_chain_path else {}
+
+    aligned_cur = {}
+    aligned_asm = {}
+    insertions_map = {}
+
+    all_q_names = set(list((cur_gaps_raw or {}).keys()) + list((asm_gaps_raw or {}).keys()))
+    for super_name in all_q_names:
+        t2t_name = super_to_t2t.get(super_name)
+        if not t2t_name: continue
+        all_chains = chains_col.get((super_name, t2t_name), []) + chains_nc.get((super_name, t2t_name), [])
+        
+        # 1. Discover all query insertions >= min_ins_size
+        ins_list = []
+        for h, blks in all_chains:
+            t_curr = h['tStart']; q_curr = h['qStart']
+            for size, dt, dq in blks:
+                if dq >= min_ins_size:
+                    t_anchor = t_curr + size if h['strand'] == '+' else t_curr + dt
+                    ins_list.append({
+                        't_anchor': t_anchor,
+                        'dt': dt,
+                        'dq': dq,
+                        'q_start': q_curr + size,
+                        'q_end': q_curr + size + dq,
+                        'strand': h['strand'],
+                        'cur_gaps': [],
+                        'asm_gaps': []
+                    })
+                t_curr += size + dt
+                q_curr += size + dq
+                
+        col_blks = liftover_col.get(super_name, {}).get(t2t_name, [])
+        nc_blks  = liftover_nc.get(super_name, {}).get(t2t_name, [])
+        
+        # 2. Process curation gaps
+        mapped_cur = []
+        for gs, ge in (cur_gaps_raw or {}).get(super_name, []):
+            mid = (gs + ge) / 2
+            inside_ins = None
+            for ins in ins_list:
+                if ins['q_start'] <= mid <= ins['q_end']:
+                    inside_ins = ins
+                    break
+            if inside_ins:
+                inside_ins['cur_gaps'].append((mid - inside_ins['q_start'], gs, ge))
+            else:
+                pos = _map_gap_pos(gs, col_blks, nc_blks)
+                if pos is not None:
+                    mapped_cur.append((gs, pos))
+        if mapped_cur:
+            sz = seq_sizes.get(t2t_name) if seq_sizes else None
+            min_sep = max(int(sz * 0.005), 80_000) if sz else 350_000
+            sep_positions = separate_curation_gaps(mapped_cur, min_sep=min_sep, chrom_size=sz)
+            aligned_cur[t2t_name] = [(p - 50, p + 50) for p in sep_positions]
+            
+        # 3. Process assembly gaps
+        for gs, ge in (asm_gaps_raw or {}).get(super_name, []):
+            mid = (gs + ge) / 2
+            inside_ins = None
+            for ins in ins_list:
+                if ins['q_start'] <= mid <= ins['q_end']:
+                    inside_ins = ins
+                    break
+            if inside_ins:
+                inside_ins['asm_gaps'].append((mid - inside_ins['q_start'], gs, ge))
+            else:
+                pos = _map_gap_pos(gs, col_blks, nc_blks)
+                if pos is not None:
+                    aligned_asm.setdefault(t2t_name, []).append((pos - 50, pos + 50))
+
+        if ins_list:
+            insertions_map[t2t_name] = ins_list
+
+    return aligned_asm, aligned_cur, insertions_map
+
+
 _LIFTOVER_GAP         = 50_000
 _CHAIN_EDGE_TOLERANCE = 10
 
@@ -693,14 +805,18 @@ def _constriction_path(x0, x1, yc, bar_h, cs, ce, waist_frac=0.55):
 # =============================================================================
 
 def make_y_layout_triple(group_order, chrom_groups, hap_filter,
-                         BAR_H, HAP_GAP, GROUP_GAP):
+                         BAR_H, HAP_GAP, GROUP_GAP,
+                         SUB_H=0.0, SUB_GAP=0.0):
     """Three bar positions per chromosome: Single (top), Dual (middle), ONT (bottom)."""
     h = BAR_H / 2
-    yp_s  = {}
-    yp_d  = {}
-    yp_o  = {}
-    y_lbl = {}
-    y_spn = {}
+    yp_s    = {}
+    yp_d    = {}
+    yp_o    = {}
+    y_sub_s = {}
+    y_sub_d = {}
+    y_sub_o = {}
+    y_lbl   = {}
+    y_spn   = {}
     y = 0.0
     for tok in group_order:
         nm = next((n for n in chrom_groups.get(tok, []) if hap_filter(n)), None)
@@ -708,16 +824,25 @@ def make_y_layout_triple(group_order, chrom_groups, hap_filter,
             continue
         span_top   = y
         yp_s[nm]   = y + h;  y += BAR_H
+        if SUB_H > 0:
+            y += SUB_GAP
+            y_sub_s[nm] = y + SUB_H / 2; y += SUB_H
         y          += HAP_GAP
         yp_d[nm]   = y + h;  y += BAR_H
+        if SUB_H > 0:
+            y += SUB_GAP
+            y_sub_d[nm] = y + SUB_H / 2; y += SUB_H
         y          += HAP_GAP
         yp_o[nm]   = y + h;  y += BAR_H
+        if SUB_H > 0:
+            y += SUB_GAP
+            y_sub_o[nm] = y + SUB_H / 2; y += SUB_H
         span_bot   = y
         y_lbl[tok] = (span_top + span_bot) / 2
         y_spn[tok] = (span_top, span_bot)
         y          += GROUP_GAP
     total_y = max(y - GROUP_GAP, BAR_H)
-    return yp_s, yp_d, yp_o, y_lbl, y_spn, total_y
+    return yp_s, yp_d, yp_o, y_sub_s, y_sub_d, y_sub_o, y_lbl, y_spn, total_y
 
 
 # =============================================================================
@@ -829,7 +954,15 @@ def _draw_haplotype_panel(ax, fig_w, fig_h,
                           gaps_ont=None,
                           gaps_dual_asm=None,
                           gaps_single_asm=None,
-                          gaps_ont_asm=None):
+                          gaps_ont_asm=None,
+                          yp_sub_single=None,
+                          yp_sub_dual=None,
+                          yp_sub_ont=None,
+                          SUB_H=0.0,
+                          insertions_single=None,
+                          insertions_dual=None,
+                          insertions_ont=None,
+                          insertion_track='none'):
     st = style or STYLES['paper']
     h  = BAR_H / 2
 
@@ -882,7 +1015,8 @@ def _draw_haplotype_panel(ax, fig_w, fig_h,
                                       zorder=10, clip_on=False))
 
     def _draw_bar(nm, yc, col_dark, col_light, cov_, nc_cov_, sw_, telo_, telo_nc_,
-                  gaps_=None, gaps_asm_=None):
+                  gaps_=None, gaps_asm_=None,
+                  y_sub=None, SUB_H=0.0, insertions_=None, insertion_track='none'):
         size = size_of(nm)
         flip = flip_set is not None and nm in flip_set
 
@@ -1007,23 +1141,115 @@ def _draw_haplotype_panel(ax, fig_w, fig_h,
             if 'p' in arms: _telo_semi(0,    'p', yc - h, yc + h, hollow=True)
             if 'q' in arms: _telo_semi(size, 'q', yc - h, yc + h, hollow=True)
 
+        # ---- Draw Query Insertion Sub-track (Option A or Option B) ----------
+        if y_sub is not None and SUB_H > 0 and insertion_track in ('optionA', 'optionB'):
+            h_sub = SUB_H / 2
+            ax.add_patch(mpatches.Rectangle((0, y_sub - h_sub), size, SUB_H,
+                                           fc='#F8F9FA', ec='#D0D7DE', lw=st['border_lw'] * 0.5, zorder=2))
+            ins_list = (insertions_ or {}).get(nm, [])
+            if insertion_track == 'optionA':
+                for ins in ins_list:
+                    t_anchor = ins['t_anchor']
+                    if flip:
+                        t_anchor = size - t_anchor
+                    w = max(max_size * 0.007, 200_000)
+                    if ins['dt'] > w:
+                        w = ins['dt']
+                    x0 = max(0, t_anchor - w / 2)
+                    x1 = min(size, t_anchor + w / 2)
+                    ins_patch = mpatches.Rectangle((x0, y_sub - h_sub), x1 - x0, SUB_H,
+                                                   fc='#E76F51', ec='#2C3E50', lw=st['border_lw'] * 0.8,
+                                                   alpha=0.9, zorder=5)
+                    ax.add_patch(ins_patch)
+                    
+                    cgaps = ins.get('cur_gaps', [])
+                    if len(cgaps) == 1:
+                        mid_x = (x0 + x1) / 2
+                        ax.plot([mid_x, mid_x], [y_sub - h_sub, y_sub + h_sub],
+                                color='#B22222', lw=max(0.7, st['border_lw'] * 1.6), zorder=8, solid_capstyle='butt')
+                    elif len(cgaps) > 1:
+                        for rel_pos, gs, ge in cgaps:
+                            frac = min(1.0, max(0.0, rel_pos / max(ins['dq'], 1)))
+                            tick_x = x0 + (x1 - x0) * (0.12 + 0.76 * frac)
+                            ax.plot([tick_x, tick_x], [y_sub - h_sub, y_sub + h_sub],
+                                    color='#B22222', lw=max(0.7, st['border_lw'] * 1.6), zorder=8, solid_capstyle='butt')
+
+                    agaps = ins.get('asm_gaps', [])
+                    for rel_pos, gs, ge in agaps:
+                        frac = min(1.0, max(0.0, rel_pos / max(ins['dq'], 1)))
+                        tick_x = x0 + (x1 - x0) * (0.12 + 0.76 * frac)
+                        ax.plot([tick_x, tick_x], [y_sub - h_sub, y_sub + h_sub],
+                                color=COL_ASM_GAP, lw=max(0.5, st['border_lw'] * 1.2), zorder=7, solid_capstyle='butt')
+
+                    if ins['dq'] >= 500_000 or len(cgaps) >= 3:
+                        n_g = len(cgaps)
+                        txt = f"+{ins['dq']/1e6:.1f}M ({n_g})" if n_g > 0 else f"+{ins['dq']/1e6:.1f}M"
+                        ax.text(t_anchor, y_sub + h_sub + 0.04 * BAR_H, txt,
+                                fontsize=max(3.8, st['font_n'] * 0.75), color='#8B2500', fontweight='bold',
+                                ha='center', va='top', zorder=12)
+
+            elif insertion_track == 'optionB':
+                for ins in ins_list:
+                    t_anchor = ins['t_anchor']
+                    if flip:
+                        t_anchor = size - t_anchor
+                    seg_w = max(max_size * 0.015, min(max_size * 0.09, 1_200_000 * np.log10(ins['dq'] / 10_000 + 1)))
+                    x_left  = max(0, t_anchor - seg_w / 2)
+                    x_right = min(size, t_anchor + seg_w / 2)
+                    
+                    ax.plot([t_anchor, x_left],  [yc + h, y_sub - h_sub], color='#E76F51', lw=st['border_lw'] * 0.8, alpha=0.6, zorder=3)
+                    ax.plot([t_anchor, x_right], [yc + h, y_sub - h_sub], color='#E76F51', lw=st['border_lw'] * 0.8, alpha=0.6, zorder=3)
+                    ax.fill([t_anchor, x_right, x_left], [yc + h, y_sub - h_sub, y_sub - h_sub],
+                            color='#FCEADE', alpha=0.25, zorder=2)
+                    
+                    seg_patch = mpatches.Rectangle((x_left, y_sub - h_sub), x_right - x_left, SUB_H,
+                                                   fc='#FCEADE', ec='#E76F51', lw=st['border_lw'] * 0.8, zorder=5)
+                    ax.add_patch(seg_patch)
+                    
+                    cgaps = ins.get('cur_gaps', [])
+                    for rel_pos, gs, ge in cgaps:
+                        frac = min(1.0, max(0.0, rel_pos / max(ins['dq'], 1)))
+                        tick_x = x_left + frac * (x_right - x_left)
+                        ax.plot([tick_x, tick_x], [y_sub - h_sub, y_sub + h_sub],
+                                color='#B22222', lw=max(0.7, st['border_lw'] * 1.6), zorder=8, solid_capstyle='butt')
+                                
+                    agaps = ins.get('asm_gaps', [])
+                    for rel_pos, gs, ge in agaps:
+                        frac = min(1.0, max(0.0, rel_pos / max(ins['dq'], 1)))
+                        tick_x = x_left + frac * (x_right - x_left)
+                        ax.plot([tick_x, tick_x], [y_sub - h_sub, y_sub + h_sub],
+                                color=COL_ASM_GAP, lw=max(0.5, st['border_lw'] * 1.2), zorder=7, solid_capstyle='butt')
+
+                    if ins['dq'] >= 500_000 or len(cgaps) >= 3:
+                        n_g = len(cgaps)
+                        txt = f"+{ins['dq']/1e6:.1f}Mb ({n_g} joins)" if n_g > 0 else f"+{ins['dq']/1e6:.1f}Mb"
+                        ax.text((x_left + x_right) / 2, y_sub + h_sub + 0.04 * BAR_H, txt,
+                                fontsize=max(3.8, st['font_n'] * 0.75), color='#8B2500', fontweight='bold',
+                                ha='center', va='top', zorder=12)
+
     for nm in hap_names:
         if nm in yp_single:
             _draw_bar(nm, yp_single[nm],
                       COL_COV_S_DARK, COL_COV_S,
                       cov_s, nc_cov_s, switch_s, telo_s, telo_nc_s,
-                      gaps_=gaps_single, gaps_asm_=gaps_single_asm)
+                      gaps_=gaps_single, gaps_asm_=gaps_single_asm,
+                      y_sub=yp_sub_single.get(nm) if yp_sub_single else None,
+                      SUB_H=SUB_H, insertions_=insertions_single, insertion_track=insertion_track)
         if nm in yp_dual:
             _draw_bar(nm, yp_dual[nm],
                       COL_COV_D_DARK, COL_COV_D,
                       cov_d, nc_cov_d, switch_d, telo_d, telo_nc_d,
-                      gaps_=gaps_dual, gaps_asm_=gaps_dual_asm)
+                      gaps_=gaps_dual, gaps_asm_=gaps_dual_asm,
+                      y_sub=yp_sub_dual.get(nm) if yp_sub_dual else None,
+                      SUB_H=SUB_H, insertions_=insertions_dual, insertion_track=insertion_track)
         if yp_ont and nm in yp_ont:
             _draw_bar(nm, yp_ont[nm],
                       COL_COV_O_DARK, COL_COV_O,
                       cov_ont or {}, nc_cov_ont or {}, switch_ont or {},
                       telo_ont, telo_nc_ont,
-                      gaps_=gaps_ont, gaps_asm_=gaps_ont_asm)
+                      gaps_=gaps_ont, gaps_asm_=gaps_ont_asm,
+                      y_sub=yp_sub_ont.get(nm) if yp_sub_ont else None,
+                      SUB_H=SUB_H, insertions_=insertions_ont, insertion_track=insertion_track)
 
     ax.set_yticks([])
 
@@ -1068,9 +1294,13 @@ def build_haplotype_figure(df_s, df_d,
                            gaps_dual=None,
                            gaps_single=None,
                            gaps_ont=None,
-                           gaps_dual_asm=None,
-                           gaps_single_asm=None,
-                           gaps_ont_asm=None):
+                            gaps_dual_asm=None,
+                            gaps_single_asm=None,
+                            gaps_ont_asm=None,
+                            insertions_dual=None,
+                            insertions_single=None,
+                            insertions_ont=None,
+                            insertion_track='none'):
 
     all_names = sorted(
         set(df_s.index) | set(df_d.index),
@@ -1105,26 +1335,28 @@ def build_haplotype_figure(df_s, df_d,
     })
 
     BAR_H     = st['BAR_H']
+    SUB_H     = BAR_H * 0.32 if insertion_track != 'none' else 0.0
+    SUB_GAP   = BAR_H * 0.12 if insertion_track != 'none' else 0.0
     HAP_GAP   = BAR_H * 0.14
-    GROUP_GAP = BAR_H * 0.52
+    GROUP_GAP = BAR_H * (0.58 if insertion_track != 'none' else 0.52)
     is_mat    = lambda nm: not is_pat(nm)
 
-    yps_pat_mac, ypd_pat_mac, ypo_pat_mac, yl_pat_mac, ys_pat_mac, _ty_p_mac = \
-        make_y_layout_triple(macro_order, chrom_groups, is_pat, BAR_H, HAP_GAP, GROUP_GAP)
-    yps_mat_mac, ypd_mat_mac, ypo_mat_mac, yl_mat_mac, ys_mat_mac, _ty_m_mac = \
-        make_y_layout_triple(macro_order, chrom_groups, is_mat, BAR_H, HAP_GAP, GROUP_GAP)
+    yps_pat_mac, ypd_pat_mac, ypo_pat_mac, y_sub_s_pat_mac, y_sub_d_pat_mac, y_sub_o_pat_mac, yl_pat_mac, ys_pat_mac, _ty_p_mac = \
+        make_y_layout_triple(macro_order, chrom_groups, is_pat, BAR_H, HAP_GAP, GROUP_GAP, SUB_H, SUB_GAP)
+    yps_mat_mac, ypd_mat_mac, ypo_mat_mac, y_sub_s_mat_mac, y_sub_d_mat_mac, y_sub_o_mat_mac, yl_mat_mac, ys_mat_mac, _ty_m_mac = \
+        make_y_layout_triple(macro_order, chrom_groups, is_mat, BAR_H, HAP_GAP, GROUP_GAP, SUB_H, SUB_GAP)
     ty_mac = max(_ty_p_mac, _ty_m_mac)
 
-    yps_pat_mic, ypd_pat_mic, ypo_pat_mic, yl_pat_mic, ys_pat_mic, _ty_p_mic = \
-        make_y_layout_triple(micro_order, chrom_groups, is_pat, BAR_H, HAP_GAP, GROUP_GAP)
-    yps_mat_mic, ypd_mat_mic, ypo_mat_mic, yl_mat_mic, ys_mat_mic, _ty_m_mic = \
-        make_y_layout_triple(micro_order, chrom_groups, is_mat, BAR_H, HAP_GAP, GROUP_GAP)
+    yps_pat_mic, ypd_pat_mic, ypo_pat_mic, y_sub_s_pat_mic, y_sub_d_pat_mic, y_sub_o_pat_mic, yl_pat_mic, ys_pat_mic, _ty_p_mic = \
+        make_y_layout_triple(micro_order, chrom_groups, is_pat, BAR_H, HAP_GAP, GROUP_GAP, SUB_H, SUB_GAP)
+    yps_mat_mic, ypd_mat_mic, ypo_mat_mic, y_sub_s_mat_mic, y_sub_d_mat_mic, y_sub_o_mat_mic, yl_mat_mic, ys_mat_mic, _ty_m_mic = \
+        make_y_layout_triple(micro_order, chrom_groups, is_mat, BAR_H, HAP_GAP, GROUP_GAP, SUB_H, SUB_GAP)
     ty_mic = max(_ty_p_mic, _ty_m_mic)
 
-    yps_pat_nan, ypd_pat_nan, ypo_pat_nan, yl_pat_nan, ys_pat_nan, _ty_p_nan = \
-        make_y_layout_triple(nano_order,  chrom_groups, is_pat, BAR_H, HAP_GAP, GROUP_GAP)
-    yps_mat_nan, ypd_mat_nan, ypo_mat_nan, yl_mat_nan, ys_mat_nan, _ty_m_nan = \
-        make_y_layout_triple(nano_order,  chrom_groups, is_mat, BAR_H, HAP_GAP, GROUP_GAP)
+    yps_pat_nan, ypd_pat_nan, ypo_pat_nan, y_sub_s_pat_nan, y_sub_d_pat_nan, y_sub_o_pat_nan, yl_pat_nan, ys_pat_nan, _ty_p_nan = \
+        make_y_layout_triple(nano_order,  chrom_groups, is_pat, BAR_H, HAP_GAP, GROUP_GAP, SUB_H, SUB_GAP)
+    yps_mat_nan, ypd_mat_nan, ypo_mat_nan, y_sub_s_mat_nan, y_sub_d_mat_nan, y_sub_o_mat_nan, yl_mat_nan, ys_mat_nan, _ty_m_nan = \
+        make_y_layout_triple(nano_order,  chrom_groups, is_mat, BAR_H, HAP_GAP, GROUP_GAP, SUB_H, SUB_GAP)
     ty_nan = max(_ty_p_nan, _ty_m_nan)
 
     def _hap_names(grp_order, filt):
@@ -1156,7 +1388,7 @@ def build_haplotype_figure(df_s, df_d,
         nano_order,  chrom_groups, cov_summary_s, cov_summary_d, cov_summary_ont)
 
     fig_w = st['fig_w']
-    fig_h = st['fig_h']
+    fig_h = st['fig_h'] * (1.18 if insertion_track != 'none' else 1.0)
     fig   = plt.figure(figsize=(fig_w, fig_h), facecolor='white')
 
     hr = [ty_mac, ty_mic, ty_nan]
@@ -1190,23 +1422,23 @@ def build_haplotype_figure(df_s, df_d,
 
     row_specs = [
         (ax_mm, ax_pm, ax_avg_mac,
-         names_mat_mac, yps_mat_mac, ypd_mat_mac, ypo_mat_mac, yl_mat_mac, ys_mat_mac,
-         names_pat_mac, yps_pat_mac, ypd_pat_mac, ypo_pat_mac, yl_pat_mac, ys_pat_mac,
+         names_mat_mac, yps_mat_mac, ypd_mat_mac, ypo_mat_mac, y_sub_s_mat_mac, y_sub_d_mat_mac, y_sub_o_mat_mac, yl_mat_mac, ys_mat_mac,
+         names_pat_mac, yps_pat_mac, ypd_pat_mac, ypo_pat_mac, y_sub_s_pat_mac, y_sub_d_pat_mac, y_sub_o_pat_mac, yl_pat_mac, ys_pat_mac,
          ty_mac, max_mac, macro_order, avg_s_mac, avg_d_mac, avg_ont_mac),
         (ax_mu, ax_pu, ax_avg_mic,
-         names_mat_mic, yps_mat_mic, ypd_mat_mic, ypo_mat_mic, yl_mat_mic, ys_mat_mic,
-         names_pat_mic, yps_pat_mic, ypd_pat_mic, ypo_pat_mic, yl_pat_mic, ys_pat_mic,
+         names_mat_mic, yps_mat_mic, ypd_mat_mic, ypo_mat_mic, y_sub_s_mat_mic, y_sub_d_mat_mic, y_sub_o_mat_mic, yl_mat_mic, ys_mat_mic,
+         names_pat_mic, yps_pat_mic, ypd_pat_mic, ypo_pat_mic, y_sub_s_pat_mic, y_sub_d_pat_mic, y_sub_o_pat_mic, yl_pat_mic, ys_pat_mic,
          ty_mic, max_mic, micro_order, avg_s_mic, avg_d_mic, avg_ont_mic),
         (ax_mn, ax_pn, ax_avg_nan,
-         names_mat_nan, yps_mat_nan, ypd_mat_nan, ypo_mat_nan, yl_mat_nan, ys_mat_nan,
-         names_pat_nan, yps_pat_nan, ypd_pat_nan, ypo_pat_nan, yl_pat_nan, ys_pat_nan,
+         names_mat_nan, yps_mat_nan, ypd_mat_nan, ypo_mat_nan, y_sub_s_mat_nan, y_sub_d_mat_nan, y_sub_o_mat_nan, yl_mat_nan, ys_mat_nan,
+         names_pat_nan, yps_pat_nan, ypd_pat_nan, ypo_pat_nan, y_sub_s_pat_nan, y_sub_d_pat_nan, y_sub_o_pat_nan, yl_pat_nan, ys_pat_nan,
          ty_nan, max_nan, nano_order, avg_s_nan, avg_d_nan, avg_ont_nan),
     ]
 
     n_rows = len(row_specs)
     for row_i, (ax_m, ax_p, ax_avg,
-                m_nms, yps_m, ypd_m, ypo_m, yl_m, ys_m,
-                p_nms, yps_p, ypd_p, ypo_p, yl_p, ys_p,
+                m_nms, yps_m, ypd_m, ypo_m, y_sub_s_m, y_sub_d_m, y_sub_o_m, yl_m, ys_m,
+                p_nms, yps_p, ypd_p, ypo_p, y_sub_s_p, y_sub_d_p, y_sub_o_p, yl_p, ys_p,
                 ty, max_sz, grp_order,
                 avg_s_grp, avg_d_grp, avg_ont_grp) in enumerate(row_specs):
 
@@ -1246,7 +1478,15 @@ def build_haplotype_figure(df_s, df_d,
                               gaps_ont=gaps_ont,
                               gaps_dual_asm=gaps_dual_asm,
                               gaps_single_asm=gaps_single_asm,
-                              gaps_ont_asm=gaps_ont_asm)
+                              gaps_ont_asm=gaps_ont_asm,
+                              yp_sub_single=y_sub_s_m,
+                              yp_sub_dual=y_sub_d_m,
+                              yp_sub_ont=y_sub_o_m,
+                              SUB_H=SUB_H,
+                              insertions_single=insertions_single,
+                              insertions_dual=insertions_dual,
+                              insertions_ont=insertions_ont,
+                              insertion_track=insertion_track)
 
         # Paternal panel
         _draw_haplotype_panel(ax_p, fig_w, fig_h,
@@ -1274,7 +1514,15 @@ def build_haplotype_figure(df_s, df_d,
                               gaps_ont=gaps_ont,
                               gaps_dual_asm=gaps_dual_asm,
                               gaps_single_asm=gaps_single_asm,
-                              gaps_ont_asm=gaps_ont_asm)
+                              gaps_ont_asm=gaps_ont_asm,
+                              yp_sub_single=y_sub_s_p,
+                              yp_sub_dual=y_sub_d_p,
+                              yp_sub_ont=y_sub_o_p,
+                              SUB_H=SUB_H,
+                              insertions_single=insertions_single,
+                              insertions_dual=insertions_dual,
+                              insertions_ont=insertions_ont,
+                              insertion_track=insertion_track)
 
         # Coverage panel
         if ax_avg is not None:
@@ -1301,6 +1549,8 @@ def build_haplotype_figure(df_s, df_d,
         mpatches.Patch(fc=COL_BORDER, ec=COL_BORDER, lw=0.5,    label='Centromere'),
         _telo_coll, _telo_nc,
     ]
+    if insertion_track in ('optionA', 'optionB'):
+        legend_handles.append(mpatches.Patch(fc='#E76F51', ec='#2C3E50', lw=0.5, label='Assembly insertion (absent in T2T)'))
     _cen_handle = legend_handles[9]
     fig.legend(handles=legend_handles, loc='lower center',
                fontsize=st['font_legend'], ncol=st['ncol_legend'],
@@ -1399,6 +1649,9 @@ def main():
     parser.add_argument('--centromeres',          required=False, metavar='FILE', default=None)
     parser.add_argument('--telo-p-bed',           required=False, metavar='FILE', default=None)
     # Output & Styling
+    parser.add_argument('--insertion-track',      default='none', choices=['none', 'optionA', 'optionB'],
+                        help='Display unaligned assembly sequence insertions with curation gaps as sub-tracks: '
+                             'none (default), optionA (compact block footprint), optionB (expanded segment loops)')
     parser.add_argument('--output',               required=True,  metavar='FILE')
     parser.add_argument('--layout',    default='butterfly', choices=['butterfly', 'columns'])
     parser.add_argument('--style',     default='paper',     choices=['paper', 'poster'])
@@ -1494,27 +1747,50 @@ def main():
             print(f'  Centromere flip: {len(cen_flip)} chromosome(s) flipped toward center: {sorted(cen_flip)}')
             flip_set = (flip_set or set()) | cen_flip
 
-    print('Loading and lifting annotated gaps...')
     gaps_single_asm = gaps_single = None
-    if args.single_annotated_gaps:
-        asm_s, cur_s = load_annotated_gaps_bed(args.single_annotated_gaps)
-        gaps_single_asm = lift_gaps_to_t2t(asm_s, args.single_pairs, args.single_chain, args.single_nc_chain, seq_sizes=seq_sizes, is_curation=False)
-        gaps_single     = lift_gaps_to_t2t(cur_s, args.single_pairs, args.single_chain, args.single_nc_chain, seq_sizes=seq_sizes, is_curation=True)
-        print(f'  Single: {sum(len(v) for v in gaps_single.values())} curation, {sum(len(v) for v in gaps_single_asm.values())} assembly gaps lifted.')
+    gaps_dual_asm   = gaps_dual   = None
+    gaps_ont_asm    = gaps_ont    = None
+    ins_single = ins_dual = ins_ont = None
 
-    gaps_dual_asm = gaps_dual = None
-    if args.dual_annotated_gaps:
-        asm_d, cur_d = load_annotated_gaps_bed(args.dual_annotated_gaps)
-        gaps_dual_asm = lift_gaps_to_t2t(asm_d, args.dual_pairs, args.dual_chain, args.dual_nc_chain, seq_sizes=seq_sizes, is_curation=False)
-        gaps_dual     = lift_gaps_to_t2t(cur_d, args.dual_pairs, args.dual_chain, args.dual_nc_chain, seq_sizes=seq_sizes, is_curation=True)
-        print(f'  Dual: {sum(len(v) for v in gaps_dual.values())} curation, {sum(len(v) for v in gaps_dual_asm.values())} assembly gaps lifted.')
+    if args.insertion_track != 'none':
+        print(f'Extracting query insertions and classifying gaps (track mode: {args.insertion_track})...')
+        if args.single_annotated_gaps:
+            asm_s, cur_s = load_annotated_gaps_bed(args.single_annotated_gaps)
+            gaps_single_asm, gaps_single, ins_single = extract_insertions_and_gaps(
+                asm_s, cur_s, args.single_pairs, args.single_chain, args.single_nc_chain, seq_sizes=seq_sizes)
+            print(f'  Single: {sum(len(v) for v in gaps_single.values())} aligned curation gaps, '
+                  f'{sum(len(ins["cur_gaps"]) for v in ins_single.values() for ins in v)} inside insertions.')
+        if args.dual_annotated_gaps:
+            asm_d, cur_d = load_annotated_gaps_bed(args.dual_annotated_gaps)
+            gaps_dual_asm, gaps_dual, ins_dual = extract_insertions_and_gaps(
+                asm_d, cur_d, args.dual_pairs, args.dual_chain, args.dual_nc_chain, seq_sizes=seq_sizes)
+            print(f'  Dual: {sum(len(v) for v in gaps_dual.values())} aligned curation gaps, '
+                  f'{sum(len(ins["cur_gaps"]) for v in ins_dual.values() for ins in v)} inside insertions.')
+        if args.ont_annotated_gaps:
+            asm_o, cur_o = load_annotated_gaps_bed(args.ont_annotated_gaps)
+            gaps_ont_asm, gaps_ont, ins_ont = extract_insertions_and_gaps(
+                asm_o, cur_o, args.ont_dual_pairs, args.ont_dual_chain, args.ont_dual_nc_chain, seq_sizes=seq_sizes)
+            print(f'  ONT: {sum(len(v) for v in gaps_ont.values())} aligned curation gaps, '
+                  f'{sum(len(ins["cur_gaps"]) for v in ins_ont.values() for ins in v)} inside insertions.')
+    else:
+        print('Loading and lifting annotated gaps...')
+        if args.single_annotated_gaps:
+            asm_s, cur_s = load_annotated_gaps_bed(args.single_annotated_gaps)
+            gaps_single_asm = lift_gaps_to_t2t(asm_s, args.single_pairs, args.single_chain, args.single_nc_chain, seq_sizes=seq_sizes, is_curation=False)
+            gaps_single     = lift_gaps_to_t2t(cur_s, args.single_pairs, args.single_chain, args.single_nc_chain, seq_sizes=seq_sizes, is_curation=True)
+            print(f'  Single: {sum(len(v) for v in gaps_single.values())} curation, {sum(len(v) for v in gaps_single_asm.values())} assembly gaps lifted.')
 
-    gaps_ont_asm = gaps_ont = None
-    if args.ont_annotated_gaps:
-        asm_o, cur_o = load_annotated_gaps_bed(args.ont_annotated_gaps)
-        gaps_ont_asm = lift_gaps_to_t2t(asm_o, args.ont_dual_pairs, args.ont_dual_chain, args.ont_dual_nc_chain, seq_sizes=seq_sizes, is_curation=False)
-        gaps_ont     = lift_gaps_to_t2t(cur_o, args.ont_dual_pairs, args.ont_dual_chain, args.ont_dual_nc_chain, seq_sizes=seq_sizes, is_curation=True)
-        print(f'  ONT: {sum(len(v) for v in gaps_ont.values())} curation, {sum(len(v) for v in gaps_ont_asm.values())} assembly gaps lifted.')
+        if args.dual_annotated_gaps:
+            asm_d, cur_d = load_annotated_gaps_bed(args.dual_annotated_gaps)
+            gaps_dual_asm = lift_gaps_to_t2t(asm_d, args.dual_pairs, args.dual_chain, args.dual_nc_chain, seq_sizes=seq_sizes, is_curation=False)
+            gaps_dual     = lift_gaps_to_t2t(cur_d, args.dual_pairs, args.dual_chain, args.dual_nc_chain, seq_sizes=seq_sizes, is_curation=True)
+            print(f'  Dual: {sum(len(v) for v in gaps_dual.values())} curation, {sum(len(v) for v in gaps_dual_asm.values())} assembly gaps lifted.')
+
+        if args.ont_annotated_gaps:
+            asm_o, cur_o = load_annotated_gaps_bed(args.ont_annotated_gaps)
+            gaps_ont_asm = lift_gaps_to_t2t(asm_o, args.ont_dual_pairs, args.ont_dual_chain, args.ont_dual_nc_chain, seq_sizes=seq_sizes, is_curation=False)
+            gaps_ont     = lift_gaps_to_t2t(cur_o, args.ont_dual_pairs, args.ont_dual_chain, args.ont_dual_nc_chain, seq_sizes=seq_sizes, is_curation=True)
+            print(f'  ONT: {sum(len(v) for v in gaps_ont.values())} curation, {sum(len(v) for v in gaps_ont_asm.values())} assembly gaps lifted.')
 
     dpi = args.dpi or STYLES.get(args.style, STYLES['paper'])['dpi_default']
     print(f'Building figure (layout={args.layout}, style={args.style}, dpi={dpi})...')
@@ -1537,7 +1813,11 @@ def main():
         gaps_ont=gaps_ont,
         gaps_dual_asm=gaps_dual_asm,
         gaps_single_asm=gaps_single_asm,
-        gaps_ont_asm=gaps_ont_asm
+        gaps_ont_asm=gaps_ont_asm,
+        insertions_dual=ins_dual,
+        insertions_single=ins_single,
+        insertions_ont=ins_ont,
+        insertion_track=args.insertion_track
     )
     print(f'SUCCESS! Figure saved to {out}')
 
