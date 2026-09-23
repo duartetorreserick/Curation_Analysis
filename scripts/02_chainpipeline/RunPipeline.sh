@@ -43,6 +43,7 @@ SAMTOOLS="/lustre/fs5/vgl/scratch/eduarte/miniconda3/envs/vgp/bin/samtools"
 SORT_SCRIPT="$SCRIPTS/02_chainpipeline/sort_fasta_pipeline.sh"
 HUNGARIAN_PY="$SCRIPTS/02_chainpipeline/hungarian_pairs.py"
 FILTER_PY="$SCRIPTS/02_chainpipeline/filter_collinear.py"
+LINEAR_GAP="/lustre/fs5/vgl/scratch/eduarte/curations/birds/bTaeGut7/redo_curation_analysis/results/inspection/strict.linearGap"
 
 # ── SLURM defaults ────────────────────────────────────────────────────────────
 PARTITION="vgl_b"
@@ -344,7 +345,7 @@ export PATH='${ENV_UCSC}/bin:/usr/bin:/bin:/lustre/fs5/vgl/scratch/eduarte/minic
 cd '${WORKDIR}'
 
 echo '--- axtChain ---'
-axtChain -linearGap=strict -psl '${NAME}'.psl \
+axtChain -linearGap='${LINEAR_GAP}' -psl '${NAME}'.psl \
   '${T2T_BASE}'.2bit '${ASM_REOR_BASE}'.2bit '${NAME}'.chain
 chainSort '${NAME}'.chain '${NAME}'.sorted.chain
 
