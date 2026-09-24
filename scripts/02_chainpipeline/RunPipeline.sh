@@ -84,8 +84,6 @@ done
 T2T_FA=$(realpath "$T2T_FA")
 ASM_FA=$(realpath "$ASM_FA")
 [[ -n "$USER_PAIRS" ]] && USER_PAIRS=$(realpath "$USER_PAIRS")
-TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-OUTDIR="${OUTDIR}_${TIMESTAMP}"
 mkdir -p "$OUTDIR"
 WORKDIR=$(realpath "$OUTDIR")
 LOGDIR="${WORKDIR}/logs"
