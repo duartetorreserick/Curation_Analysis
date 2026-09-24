@@ -28,7 +28,6 @@ echo "Output Directory: ${OUTDIR}"
   --asm-sizes "${CHAIN_DIR}/single_combined.renamed.sorted.reoriented.sizes" \
   --t2t-sizes "${CHAIN_DIR}/bTaeGut7.T2T.sizes" \
   --outdir "${OUTDIR}" \
-  --max-skip-gap 20000 \
   --min-uncovered-size 20000 \
   --ucsc-bin "${UCSC_BIN}"
 

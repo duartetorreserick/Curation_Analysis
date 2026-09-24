@@ -47,12 +47,8 @@ def parse_args():
         help="Output directory for generated BED, chain, and summary files"
     )
     parser.add_argument(
-        "--max-skip-gap", type=int, default=20000,
-        help="Maximum query gap size (bp) inside/between alignments to skip/bridge (default: 20000 bp)"
-    )
-    parser.add_argument(
         "--min-uncovered-size", type=int, default=20000,
-        help="Minimum size (bp) of an uncovered region to report and recover (default: 20000 bp)"
+        help="Minimum size (bp) of an uncovered region to report and recover; ignores anything under this size (default: 20000 bp)"
     )
     parser.add_argument(
         "--ucsc-bin", default="/lustre/fs5/vgl/scratch/eduarte/miniconda3/envs/ucsc-tools/bin",
@@ -120,9 +116,9 @@ def extract_covered_query_blocks(chain_path):
     return blocks
 
 
-def merge_and_bridge_intervals(intervals, max_skip_gap=20000):
+def merge_intervals(intervals):
     """
-    Merges overlapping intervals and bridges gaps <= max_skip_gap.
+    Merges overlapping or abutting intervals.
     Returns sorted, disjoint list of [start, end].
     """
     if not intervals:
@@ -133,8 +129,8 @@ def merge_and_bridge_intervals(intervals, max_skip_gap=20000):
     cur_s, cur_e = sorted_ivs[0]
 
     for s, e in sorted_ivs[1:]:
-        if s <= cur_e + max_skip_gap:
-            # Overlaps or gap is <= max_skip_gap: bridge across
+        if s <= cur_e:
+            # Overlaps or abuts
             cur_e = max(cur_e, e)
         else:
             merged.append((cur_s, cur_e))
@@ -143,16 +139,17 @@ def merge_and_bridge_intervals(intervals, max_skip_gap=20000):
     return merged
 
 
-def compute_uncovered_intervals(asm_sizes, covered_blocks, max_skip_gap=20000, min_uncovered_size=20000):
+def compute_uncovered_intervals(asm_sizes, covered_blocks, min_uncovered_size=20000):
     """
     Subtracts merged covered intervals from chromosome total lengths.
+    Ignores any gap under min_uncovered_size (default: 20000 bp).
     Returns list of dicts with gap info.
     """
     uncovered = []
 
     for q_name, total_len in asm_sizes.items():
         q_ivs = covered_blocks.get(q_name, [])
-        merged = merge_and_bridge_intervals(q_ivs, max_skip_gap=max_skip_gap)
+        merged = merge_intervals(q_ivs)
 
         if not merged:
             # Whole sequence uncovered
@@ -485,8 +482,7 @@ def main():
     print(f"Non-collinear Chain : {args.noncollinear_chain}")
     print(f"Assembly Sizes      : {args.asm_sizes}")
     print(f"T2T Sizes           : {args.t2t_sizes}")
-    print(f"Max Skip Gap        : {args.max_skip_gap:,} bp")
-    print(f"Min Uncovered Size  : {args.min_uncovered_size:,} bp")
+    print(f"Min Uncovered Size  : {args.min_uncovered_size:,} bp (ignoring anything under this)")
     print(f"Output Directory    : {args.outdir}")
     print("=================================================================\n")
 
@@ -507,11 +503,10 @@ def main():
     print(f"  Collinear query chromosomes    : {len(col_blocks)}")
     print(f"  Non-collinear query chromosomes: {len(nc_blocks)}")
 
-    # 3. Compute uncovered intervals (bridging gaps <= max_skip_gap)
+    # 3. Compute uncovered intervals (ignoring gaps < min_uncovered_size)
     uncovered = compute_uncovered_intervals(
         asm_sizes,
         all_covered,
-        max_skip_gap=args.max_skip_gap,
         min_uncovered_size=args.min_uncovered_size
     )
     print(f"  Total uncovered regions >= {args.min_uncovered_size:,} bp: {len(uncovered)}")
