@@ -63,7 +63,7 @@ MIN_NC_RIBBON_BP        = 20_000   # 20 kb minimum alignment to display non-coll
 
 # Palette
 COL_BORDER       = '#2c3e50'
-COL_T2T_FILL     = '#F8FAFC'
+COL_T2T_FILL     = '#000000'
 COL_UNALIGNED    = '#FFFFFF'
 
 # Collinear (Dark) & Non-Collinear (Light) Coverage Fills
@@ -84,7 +84,7 @@ COL_RIB_NC_E     = '#B45309'
 COL_RIB_REC      = '#E11D48'   # Red for recovered query-1x chains
 COL_RIB_REC_E    = '#9F1239'   # Darker red border
 COL_COV_REC      = '#E11D48'   # Red band on assembly ideogram
-ALPHA_RIB_REC    = 0.35        # 35% opacity as requested
+ALPHA_RIB_REC    = 0.25        # 25% opacity as requested
 
 # Native Feature Markers
 COL_CUR_GAP      = '#E63946'   # Curation gap tick mark
@@ -731,11 +731,8 @@ def plot_butterfly_macro(
                         if s.startswith(f"{stem}_unloc_") and (not suffix or s.endswith(suffix)):
                             unloc_candidates.add(s)
 
-                def _unloc_sort_key(u_name):
-                    align_bp = unloc_aligned.get(u_name, 0)
-                    return (-align_bp, u_name)
-
-                unloc_qual = sorted(unloc_candidates, key=_unloc_sort_key)
+                # Sort unlocs by size (descending, largest to smallest)
+                unloc_qual = sorted(unloc_candidates, key=lambda u: (-asm['sizes'].get(u, 0), u))
 
                 # Compute X-offsets for primary and unlinked scaffolds
                 SPACER = 2_200_000  # 2.2 Mb spacer between primary and unlinked
@@ -759,7 +756,7 @@ def plot_butterfly_macro(
                 else:
                     t2t_path = _rect_path(0, t2t_len, y_t2t, H_BAR_T2T)
 
-                ax.add_patch(PathPatch(t2t_path, fc=COL_T2T_FILL, ec=COL_BORDER, lw=0.6, zorder=5))
+                ax.add_patch(PathPatch(t2t_path, fc=COL_T2T_FILL, ec='#000000', lw=0.6, zorder=5))
 
                 # T2T Telomeres (colored black)
                 t2t_arms = t2t_telo.get(t2t_chrom, set())
@@ -783,17 +780,6 @@ def plot_butterfly_macro(
                         r = mpatches.Rectangle((min(x0, x1), y_asm - H_BAR_ASM / 2),
                                                abs(x1 - x0), H_BAR_ASM,
                                                fc=c_light, ec='none', alpha=0.85, zorder=6)
-                        r.set_clip_path(prim_path, transform=ax.transData)
-                        ax.add_patch(r)
-
-                    # Recovered query-1x coverage bands (red)
-                    m_rec = _merge_intervals(asm.get('rec_spans', {}).get(q_prim, []))
-                    for s, e in m_rec:
-                        x0 = (q_prim_len - e) if flip else s
-                        x1 = (q_prim_len - s) if flip else e
-                        r = mpatches.Rectangle((min(x0, x1), y_asm - H_BAR_ASM / 2),
-                                               abs(x1 - x0), H_BAR_ASM,
-                                               fc=COL_COV_REC, ec='none', alpha=0.85, zorder=6.5)
                         r.set_clip_path(prim_path, transform=ax.transData)
                         ax.add_patch(r)
 
@@ -824,24 +810,24 @@ def plot_butterfly_macro(
                         gx = (q_prim_len - (gs + ge) / 2) if flip else ((gs + ge) / 2)
                         if 'CURATION' in gtype:
                             ax.plot([gx, gx], [y_asm - H_BAR_ASM / 2, y_asm + H_BAR_ASM / 2],
-                                    color=COL_CUR_GAP, lw=1.0, zorder=9, solid_capstyle='butt')
+                                    color=COL_CUR_GAP, lw=0.55, zorder=9, solid_capstyle='butt')
                         else:
                             ax.plot([gx, gx], [y_asm - H_BAR_ASM / 2, y_asm + H_BAR_ASM / 2],
-                                    color=COL_ASM_GAP, lw=0.7, zorder=8, solid_capstyle='butt')
+                                    color=COL_ASM_GAP, lw=0.35, zorder=8, solid_capstyle='butt')
 
                     # Assembly Telomeres
                     asm_coll_arms = asm['telo_coll'].get(t2t_chrom, set()) | asm['telo_coll'].get(q_prim, set())
                     asm_nc_arms   = asm['telo_nc'].get(t2t_chrom, set()) | asm['telo_nc'].get(q_prim, set())
 
                     if p_arm in asm_coll_arms:
-                        _draw_telo_semi(ax, 0, 'p', y_asm, H_BAR_ASM, telo_rx, fc=c_dark, ec=c_dark, hollow=False)
+                        _draw_telo_semi(ax, 0, 'p', y_asm, H_BAR_ASM, telo_rx, fc='#000000', ec='#000000', hollow=False)
                     elif p_arm in asm_nc_arms:
-                        _draw_telo_semi(ax, 0, 'p', y_asm, H_BAR_ASM, telo_rx, fc='white', ec=c_dark, lw=0.9, hollow=True)
+                        _draw_telo_semi(ax, 0, 'p', y_asm, H_BAR_ASM, telo_rx, fc='white', ec='#000000', lw=1.0, hollow=True)
 
                     if q_arm in asm_coll_arms:
-                        _draw_telo_semi(ax, q_prim_len, 'q', y_asm, H_BAR_ASM, telo_rx, fc=c_dark, ec=c_dark, hollow=False)
+                        _draw_telo_semi(ax, q_prim_len, 'q', y_asm, H_BAR_ASM, telo_rx, fc='#000000', ec='#000000', hollow=False)
                     elif q_arm in asm_nc_arms:
-                        _draw_telo_semi(ax, q_prim_len, 'q', y_asm, H_BAR_ASM, telo_rx, fc='white', ec=c_dark, lw=0.9, hollow=True)
+                        _draw_telo_semi(ax, q_prim_len, 'q', y_asm, H_BAR_ASM, telo_rx, fc='white', ec='#000000', lw=1.0, hollow=True)
 
                 # =============================================================
                 # C. Unlinked Scaffolds at Chromosome End
@@ -861,14 +847,6 @@ def plot_butterfly_macro(
                         r.set_clip_path(u_path, transform=ax.transData)
                         ax.add_patch(r)
 
-                    # Recovered bands on unlinked
-                    u_rec = _merge_intervals(asm.get('rec_spans', {}).get(u, []))
-                    for s, e in u_rec:
-                        r = mpatches.Rectangle((u_off + s, y_asm - H_BAR_ASM / 2), e - s, H_BAR_ASM,
-                                               fc=COL_COV_REC, ec='none', alpha=0.85, zorder=6.5)
-                        r.set_clip_path(u_path, transform=ax.transData)
-                        ax.add_patch(r)
-
                     # Collinear bands on unlinked
                     u_col = _merge_intervals(asm['col_spans'].get(u, []))
                     for s, e in u_col:
@@ -882,10 +860,10 @@ def plot_butterfly_macro(
                         gx = u_off + (gs + ge) / 2
                         if 'CURATION' in gtype:
                             ax.plot([gx, gx], [y_asm - H_BAR_ASM / 2, y_asm + H_BAR_ASM / 2],
-                                    color=COL_CUR_GAP, lw=1.0, zorder=9)
+                                    color=COL_CUR_GAP, lw=0.55, zorder=9, solid_capstyle='butt')
                         else:
                             ax.plot([gx, gx], [y_asm - H_BAR_ASM / 2, y_asm + H_BAR_ASM / 2],
-                                    color=COL_ASM_GAP, lw=0.6, zorder=8)
+                                    color=COL_ASM_GAP, lw=0.35, zorder=8, solid_capstyle='butt')
 
                     # Label above unlinked scaffold
                     m_lbl = re.search(r'unloc_([0-9]+)', u)
@@ -1027,22 +1005,21 @@ def plot_butterfly_macro(
         # Row 3: Collinear & Non-collinear Ribbons
         mpatches.Patch(facecolor='#64748B', edgecolor='none', alpha=0.25, label='Collinear Ribbon'),
         mpatches.Patch(facecolor=COL_RIB_NC, edgecolor=COL_RIB_NC_E, lw=0.4, alpha=0.65, label='Non-collinear Ribbon'),
-        # Row 4: Recovered 1x Ribbons & Coverage
+        # Row 4: Recovered 1x Ribbons & Unaligned
         mpatches.Patch(facecolor=COL_RIB_REC, edgecolor=COL_RIB_REC_E, lw=0.4, alpha=ALPHA_RIB_REC, label='Recovered 1x Ribbon'),
-        mpatches.Patch(facecolor=COL_COV_REC, edgecolor='none', label='Recovered 1x Cov.'),
-        # Row 5: Unaligned insertion & Unlinked Scaffold
         mpatches.Patch(facecolor=COL_UNALIGNED, edgecolor=COL_BORDER, lw=0.7, label='Unaligned (≥20kb)'),
-        mpatches.Patch(facecolor='none', edgecolor='#64748B', lw=0.8, ls='--', label='Unlinked Scaffold'),
-        # Row 5: Curation Join & Assembly Gap
-        plt.Line2D([0], [0], color=COL_CUR_GAP, lw=1.8, label='Curation Gap (Join)'),
-        plt.Line2D([0], [0], color=COL_ASM_GAP, lw=1.2, label='Assembly Gap'),
-        # Row 6: Switch Block & T2T Reference
+        # Row 5: Unloc Scaffold & Switch Block
+        mpatches.Patch(facecolor='none', edgecolor='#64748B', lw=0.8, ls='--', label='Unloc Scaffold'),
         mpatches.Patch(facecolor=COL_SWITCH, edgecolor='none', label='Switch Block'),
-        mpatches.Patch(facecolor=COL_T2T_FILL, edgecolor=COL_BORDER, lw=0.7, label='T2T Reference'),
-        # Row 7: Assembly Telomeres (Collinear vs Non-collinear)
-        plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#475569', markeredgecolor='#475569',
+        # Row 6: Curation Join & Assembly Gap
+        plt.Line2D([0], [0], color=COL_CUR_GAP, lw=1.0, label='Curation Gap (Join)'),
+        plt.Line2D([0], [0], color=COL_ASM_GAP, lw=0.6, label='Assembly Gap'),
+        # Row 7: T2T Reference & Assembly Telomeres
+        mpatches.Patch(facecolor=COL_T2T_FILL, edgecolor='none', label='T2T Reference'),
+        plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#000000', markeredgecolor='#000000',
                    markersize=6, label='Collinear Telomere'),
-        plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='white', markeredgecolor='#475569',
+        # Row 8: Non-collinear Telomere
+        plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='white', markeredgecolor='#000000',
                    markeredgewidth=1.1, markersize=6, label='Non-collinear Telo.')
     ]
 
