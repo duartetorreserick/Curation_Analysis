@@ -36,11 +36,11 @@ PBED="$BASE/results/single/04_telomeres_single/p.terminal.telomeres.gap.bed"
 ANNOT="$BASE/data/annotations/annotation_HiFi_ONT.tsv"
 
 # Output Paths
-OUTDIR="$BASE/results/figures"
+OUTDIR="$BASE/results/figures/10_figures_main"
 STATS_DIR="$OUTDIR/stats"
 mkdir -p "$OUTDIR" "$STATS_DIR"
 
-DATE=$(date +%Y%m%d)
+DATE=$(date +%Y%m%d_%H%M%S)
 STATS_PREFIX="$STATS_DIR/bTaeGut7_stats_by_category_updated_categories_${DATE}"
 OUT="$OUTDIR/bTaeGut7_combined_boxplot_v2_updated_categories_panelg_${DATE}"
 
