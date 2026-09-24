@@ -28,20 +28,27 @@ echo "Timestamp: $TIMESTAMP"
 echo "Output PNG: $OUT_PNG"
 echo "Output PDF: $OUT_PDF"
 
+SINGLE_CHAIN_DIR="$BASE/results/single/02_chainpipeline_single/02_chainpipeline_single_strictLinearGap"
+DUAL_CHAIN_DIR="$BASE/results/dual/02_chainpipeline_dual/02_chainpipeline_dual_strictLinearGap"
+ONT_CHAIN_DIR="$BASE/results/ont/02_chainpipeline_ont/02_chainpipeline_ont_strictLinearGap"
+
 $PYTHON "$SCRIPT" \
-    --t2t-tsv "$BASE/results/single/03_coverage_single/chain_cov.target_cov.tsv" \
-    --single-tsv "$BASE/results/single/03_coverage_single/chain_cov.query_cov.tsv" \
-    --dual-tsv "$BASE/results/dual/03_coverage_dual/chain_cov.query_cov.tsv" \
-    --ont-tsv "$BASE/results/ont/03_coverage_ont/chain_cov.query_cov.tsv" \
-    --single-pairs "$BASE/results/single/02_chainpipeline_single/t2t.vs.single.best_chrom_pairs.tsv" \
-    --dual-pairs "$BASE/results/dual/02_chainpipeline_dual/t2t.vs.dual.best_chrom_pairs.tsv" \
-    --ont-pairs "$BASE/results/ont/02_chainpipeline_ont/t2t.vs.ont.best_chrom_pairs.tsv" \
-    --single-chain "$BASE/results/single/02_chainpipeline_single/t2t.vs.single.T2T.vs.ASM.target.collinear.chain" \
-    --single-nc-chain "$BASE/results/single/02_chainpipeline_single/t2t.vs.single.T2T.vs.ASM.target.non-collinear.chain" \
-    --dual-chain "$BASE/results/dual/02_chainpipeline_dual/t2t.vs.dual.T2T.vs.ASM.target.collinear.chain" \
-    --dual-nc-chain "$BASE/results/dual/02_chainpipeline_dual/t2t.vs.dual.T2T.vs.ASM.target.non-collinear.chain" \
-    --ont-chain "$BASE/results/ont/02_chainpipeline_ont/t2t.vs.ont.T2T.vs.ASM.target.collinear.chain" \
-    --ont-nc-chain "$BASE/results/ont/02_chainpipeline_ont/t2t.vs.ont.T2T.vs.ASM.target.non-collinear.chain" \
+    --t2t-tsv "$BASE/results/single/03_coverage_single/03_coverage_single_strictLinearGap/collinear.single.target_cov.tsv" \
+    --single-tsv "$BASE/results/single/03_coverage_single/03_coverage_single_strictLinearGap/collinear.single.query_cov.tsv" \
+    --dual-tsv "$BASE/results/dual/03_coverage_dual/03_coverage_dual_strictLinearGap/collinear.dual.query_cov.tsv" \
+    --ont-tsv "$BASE/results/ont/03_coverage_ont/03_coverage_ont_strictLinearGap/collinear.ont.query_cov.tsv" \
+    --single-pairs "$SINGLE_CHAIN_DIR/t2t.vs.single_strictGap.best_chrom_pairs.tsv" \
+    --dual-pairs "$DUAL_CHAIN_DIR/t2t.vs.dual_strictGap.best_chrom_pairs.tsv" \
+    --ont-pairs "$ONT_CHAIN_DIR/t2t.vs.ont_strictGap.best_chrom_pairs.tsv" \
+    --single-chain "$SINGLE_CHAIN_DIR/t2t.vs.single_strictGap.T2T.vs.ASM.target.collinear.chain" \
+    --single-nc-chain "$SINGLE_CHAIN_DIR/t2t.vs.single_strictGap.T2T.vs.ASM.target.non-collinear.chain" \
+    --dual-chain "$DUAL_CHAIN_DIR/t2t.vs.dual_strictGap.T2T.vs.ASM.target.collinear.chain" \
+    --dual-nc-chain "$DUAL_CHAIN_DIR/t2t.vs.dual_strictGap.T2T.vs.ASM.target.non-collinear.chain" \
+    --ont-chain "$ONT_CHAIN_DIR/t2t.vs.ont_strictGap.T2T.vs.ASM.target.collinear.chain" \
+    --ont-nc-chain "$ONT_CHAIN_DIR/t2t.vs.ont_strictGap.T2T.vs.ASM.target.non-collinear.chain" \
+    --single-rec-chain "$BASE/results/single/02_chainpipeline_single/02_chainpipeline_uncovered_single/asm_recovered_uncovered.chain" \
+    --dual-rec-chain "$BASE/results/dual/02_chainpipeline_dual/02_chainpipeline_uncovered_dual/asm_recovered_uncovered.chain" \
+    --ont-rec-chain "$BASE/results/ont/02_chainpipeline_ont/02_chainpipeline_uncovered_ont/asm_recovered_uncovered.chain" \
     --single-gaps "$BASE/results/single/06_gaps_single/single_combined.renamed.sorted.reoriented.annotated.gaps.bed" \
     --dual-gaps "$BASE/results/dual/06_gaps_dual/dual_combined.renamed.sorted.reoriented.annotated.gaps.bed" \
     --ont-gaps "$BASE/results/ont/06_gaps_ont/asm3_ONT_combined.sorted.reoriented.annotated.gaps.bed" \
@@ -53,9 +60,9 @@ $PYTHON "$SCRIPT" \
     --ont-telomeres "$BASE/results/ont/04_telomeres_ont/ont_telomere_presence.tsv" \
     --centromeres "$BASE/data/t2t/bTaeGut7v0.4_MT_rDNA.centromere_detector.v0.1.gff" \
     --telo-p-bed "$BASE/data/t2t/bTaeGut7.T2T.fasta_terminal_telomeres.bed" \
-    --single-cov-sum "$BASE/results/single/03_coverage_single/single.coverage_summary.tsv" \
-    --dual-cov-sum "$BASE/results/dual/03_coverage_dual/dual.coverage_summary.tsv" \
-    --ont-cov-sum "$BASE/results/ont/03_coverage_ont/ont.coverage_summary.tsv" \
+    --single-cov-sum "$BASE/results/single/03_coverage_single/03_coverage_single_strictLinearGap/single.coverage_summary.tsv" \
+    --dual-cov-sum "$BASE/results/dual/03_coverage_dual/03_coverage_dual_strictLinearGap/dual.coverage_summary.tsv" \
+    --ont-cov-sum "$BASE/results/ont/03_coverage_ont/03_coverage_ont_strictLinearGap/ont.coverage_summary.tsv" \
     --output-png "$OUT_PNG" \
     --output-pdf "$OUT_PDF" \
     --dpi 300
