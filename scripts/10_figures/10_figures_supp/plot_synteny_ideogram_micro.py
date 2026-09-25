@@ -56,7 +56,7 @@ import pandas as pd
 # Constants & Colors
 # =============================================================================
 
-MACRO_TOKENS = ['1', '1A', '2', '3', '4', '4A', '5', '6', '7', '8', 'ZW']
+MICRO_TOKENS = ['9', '10', '11', '12', '13', '14', '15', '17', '18', '19', '20', '21', '22', '23', '24', '26', '27', '28']
 
 INSERTION_GAP_THRESHOLD = 20_000   # 20 kb gap in query (dq) splits collinear ribbon
 MIN_NC_RIBBON_BP        = 20_000   # 20 kb minimum alignment to display non-collinear synteny ribbon
@@ -554,23 +554,22 @@ def plot_butterfly_macro(
     Renders the compact publication-quality macrochromosome synteny ideogram figure.
     Includes Maternal, Paternal, and Coverage barplot panels with classic zebra row striping.
     """
-    tokens = MACRO_TOKENS
+    tokens = MICRO_TOKENS
     n_tokens = len(tokens)
 
-    # 1. Global X scale
-    max_global_size = max(t2t_sizes.values()) if t2t_sizes else 160_000_000
-    for asm_d in (single_data, dual_data, ont_data):
-        if asm_d['sizes']:
-            max_global_size = max(max_global_size, max(asm_d['sizes'].values()))
-
-    # Ensure max_global_size accommodates primary scaffold + unloc scaffolds + spacers
-    SPACER = 2_200_000
+    # 1. Global X scale (restricted to microchromosomes in tokens)
+    max_global_size = 0
     for tok in tokens:
         for side in ('mat', 'pat'):
-            if tok == 'ZW':
-                t2t_c = 'Mat_NC_133064.1_chromosome_W' if side == 'mat' else 'Mat_NC_133063.1_chromosome_Z'
-            else:
-                t2t_c = next((k for k in t2t_sizes.keys() if f'chromosome_{tok}' in k and (side == 'pat' if ('Pat' in k or tok == 'Z') else side == 'mat')), None)
+            t2t_c = next((k for k in t2t_sizes.keys() if f'chromosome_{tok}' in k and (side == 'pat' if ('Pat' in k or tok == 'Z') else side == 'mat')), None)
+            if t2t_c and t2t_c in t2t_sizes:
+                max_global_size = max(max_global_size, t2t_sizes[t2t_c])
+
+    # Ensure max_global_size accommodates primary scaffold + unloc scaffolds + spacers
+    SPACER = 800_000  # 800 kb spacer for microchromosomes
+    for tok in tokens:
+        for side in ('mat', 'pat'):
+            t2t_c = next((k for k in t2t_sizes.keys() if f'chromosome_{tok}' in k and (side == 'pat' if ('Pat' in k or tok == 'Z') else side == 'mat')), None)
             if not t2t_c: continue
             for asm_d in (single_data, dual_data, ont_data):
                 qp = asm_d['pairs'].get(t2t_c)
@@ -586,10 +585,10 @@ def plot_butterfly_macro(
                     if s.startswith(f"{stem}_unloc_") and (not suf or s.endswith(suf)):
                         u_set.add(s)
                 for u in u_set:
-                    tot += SPACER + asm_d['sizes'].get(u, 500_000)
+                    tot += SPACER + asm_d['sizes'].get(u, 200_000)
                 max_global_size = max(max_global_size, tot)
 
-    max_global_size = max_global_size + 6_000_000
+    max_global_size = max_global_size + 1_500_000
     x_margin = max_global_size * 0.02
 
     # 2. Compact Geometry Layout
@@ -604,19 +603,19 @@ def plot_butterfly_macro(
     total_plot_height = n_tokens * ROW_H + 0.9
 
     # 3. Figure & GridSpec
-    fig_w, fig_h = 22.0, 16.0
+    fig_w, fig_h = 22.0, 25.5
     fig = plt.figure(figsize=(fig_w, fig_h), facecolor='white')
 
     # GridSpec: [ Chr (Left) | Maternal | Paternal | Right Column ]
     gs = GridSpec(1, 4, figure=fig, width_ratios=[0.26, 3.65, 3.65, 1.44],
-                  wspace=0.035, left=0.035, right=0.98, top=0.94, bottom=0.06)
+                  wspace=0.035, left=0.035, right=0.98, top=0.96, bottom=0.04)
 
     ax_chr = fig.add_subplot(gs[0, 0])
     ax_mat = fig.add_subplot(gs[0, 1])
     ax_pat = fig.add_subplot(gs[0, 2])
 
-    # Right column split: [ Compact Coverage (rows 1-4) | Legend (rows 5-11) ]
-    gs_right = GridSpecFromSubplotSpec(2, 1, subplot_spec=gs[0, 3], height_ratios=[4.2, 6.8], hspace=0.20)
+    # Right column split: [ Compact Coverage (18 rows) | Legend ]
+    gs_right = GridSpecFromSubplotSpec(2, 1, subplot_spec=gs[0, 3], height_ratios=[10.0, 8.0], hspace=0.18)
     ax_cov = fig.add_subplot(gs_right[0, 0])
     ax_leg = fig.add_subplot(gs_right[1, 0])
     ax_leg.axis('off')
@@ -751,13 +750,13 @@ def plot_butterfly_macro(
                 unloc_qual = sorted(unloc_candidates, key=_unloc_sort_key)
 
                 # Compute X-offsets for primary and unlinked scaffolds
-                SPACER = 2_200_000  # 2.2 Mb spacer between primary and unlinked
+                SPACER = 800_000  # 800 kb spacer between primary and unlinked
                 offsets = {q_prim: 0}
                 cur_x = q_prim_len
                 for u in unloc_qual:
                     cur_x += SPACER
                     offsets[u] = cur_x
-                    cur_x += asm['sizes'].get(u, 500_000)
+                    cur_x += asm['sizes'].get(u, 200_000)
 
                 # =============================================================
                 # A. Top Bar: T2T Reference Ideogram
@@ -999,8 +998,8 @@ def plot_butterfly_macro(
             y_c = (n_tok - 1) - r_idx
             ax_cov.axhspan(y_c - 0.45, y_c + 0.45, color='#F8FAFC', zorder=1)
 
-    # Extended Coordinate Axis with Ticks every 20 Mb at Bottom
-    axis_max = int(np.ceil(max_global_size / 20_000_000)) * 20_000_000
+    # Extended Coordinate Axis with Ticks every 5 Mb at Bottom
+    axis_max = int(np.ceil(max_global_size / 5_000_000)) * 5_000_000
     y_axis = 0.28
     tick_h = 0.10
 
@@ -1008,15 +1007,15 @@ def plot_butterfly_macro(
         # Continuous horizontal baseline
         ax.plot([0, axis_max], [y_axis, y_axis], color='#1E293B', lw=1.2, zorder=10)
 
-        # Periodic ticks and labels every 20 Mb
-        for tick_val in range(0, axis_max + 1, 20_000_000):
+        # Periodic ticks and labels every 5 Mb
+        for tick_val in range(0, axis_max + 1, 5_000_000):
             mb_val = tick_val // 1_000_000
             ax.plot([tick_val, tick_val], [y_axis, y_axis + tick_h], color='#1E293B', lw=1.2, zorder=10)
             ax.text(tick_val, y_axis - 0.10, f'{mb_val}', ha='center', va='top',
                     fontsize=11.5, color='#1E293B', fontweight='medium')
 
         # Unit 'Mb' at outer margin
-        lbl_x = axis_max + 4_000_000
+        lbl_x = axis_max + 1_000_000
         ha = 'right' if side == 'mat' else 'left'
         ax.text(lbl_x, y_axis, 'Mb', ha=ha, va='center', fontsize=12.5, fontweight='bold', color='#1E293B')
 
