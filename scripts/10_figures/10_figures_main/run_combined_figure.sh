@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
-# run_combined_figure_boxplot_v2_updated_categories_panelg.sh
+# run_combined_figure.sh
 #
 # Generates the multi-panel combined figure (Panels a–g) and category statistics
-# for the bTaeGut7 assembly QC (Single HiFi, Dual HiFi, and ONT Dual).
+# for the bTaeGut7 assembly QC (Single HiFi, Dual HiFi, and ONT Dual) with
+# synteny ideograms (Panels d, e, f).
 #
 # Panels:
 #   Top row:
-#     a: Per-category boxplot / stats (Macro, Micro, Dot)
+#     a: Per-category collinear coverage distribution (Macro, Micro, Dot split-violins)
 #     b: Telomere completeness lollipop
 #     c: Average genome coverage bars (Single, Dual, ONT)
 #   Ideogram rows:
-#     d: Macrochromosomes (Chr 4, W, Z butterfly)
-#     e: Microchromosomes (Chr 10, Chr 15 butterfly)
-#     f: Dot chromosomes (Chr 31, Chr 32 butterfly)
+#     d: Macrochromosomes (Chr 4, 5, W maternal; Chr 4, 5 paternal)
+#     e: Microchromosomes (Chr 11, 14, 18 butterfly)
+#     f: Dot chromosomes (Chr 32, 34, 35 butterfly)
 #   Bottom row:
-#     g: Gene-model error rates dot plot (Frameshifts, Premature stop codons, PCGs)
+#     g: Gene-model error rates (Frameshifts, Premature stop codons, PCGs)
+#   Legend:
+#     Comprehensive publication legend band at the bottom.
 
 set -euo pipefail
 
@@ -32,8 +35,13 @@ fi
 
 # T2T Reference Annotations
 CEN="$BASE/data/t2t/bTaeGut7v0.4_MT_rDNA.centromere_detector.v0.1.gff"
-PBED="$BASE/results/single/04_telomeres_single/p.terminal.telomeres.gap.bed"
+PBED="$BASE/data/t2t/bTaeGut7.T2T.fasta_terminal_telomeres.bed"
 ANNOT="$BASE/data/annotations/annotation_HiFi_ONT.tsv"
+
+# Chain and coverage directories
+SINGLE_CHAIN_DIR="$BASE/results/single/02_chainpipeline_single/02_chainpipeline_single_strictLinearGap"
+DUAL_CHAIN_DIR="$BASE/results/dual/02_chainpipeline_dual/02_chainpipeline_dual_strictLinearGap"
+ONT_CHAIN_DIR="$BASE/results/ont/02_chainpipeline_ont/02_chainpipeline_ont_strictLinearGap"
 
 # Output Paths
 OUTDIR="$BASE/results/figures/10_figures_main"
@@ -41,82 +49,68 @@ STATS_DIR="$OUTDIR/stats"
 mkdir -p "$OUTDIR" "$STATS_DIR"
 
 DATE=$(date +%Y%m%d_%H%M%S)
-STATS_PREFIX="$STATS_DIR/bTaeGut7_stats_by_category_updated_categories_${DATE}"
-OUT="$OUTDIR/bTaeGut7_combined_boxplot_v2_updated_categories_panelg_${DATE}"
+OUT="$OUTDIR/bTaeGut7_combined_figure_synteny_${DATE}"
+
+# Stats TSV (defaults to pre-generated wide stats file; can be overridden via $1)
+STATS_FILE="${1:-$STATS_DIR/bTaeGut7_stats_by_category_wide.tsv}"
+
+if [ ! -f "$STATS_FILE" ]; then
+    # Fallback to the latest available *_wide.tsv if default not found
+    LATEST_STATS=$(ls -t "$STATS_DIR"/*wide.tsv 2>/dev/null | head -n 1 || true)
+    if [ -n "$LATEST_STATS" ] && [ -f "$LATEST_STATS" ]; then
+        STATS_FILE="$LATEST_STATS"
+    else
+        echo "Warning: No stats TSV found at $STATS_FILE."
+        echo "You can generate it by running: $BASE/scripts/10_figures/10_figures_supp/run_summarize_stats_by_category.sh"
+    fi
+fi
 
 # =============================================================================
-# Step 1 — Regenerate per-category stats TSV with updated classification
+# Plot combined multi-panel figure (Panels a–g)
 # =============================================================================
 echo "========================================================================"
-echo "Step 1: Regenerating stats TSV with updated categories"
-echo "========================================================================"
-$PYTHON "$BASE/scripts/10_figures/10_figures_supp/summarize_stats_by_category.py" \
-  --single-tsv          "$BASE/results/single/03_coverage_single/chain_cov.target_cov.tsv" \
-  --dual-tsv            "$BASE/results/dual/03_coverage_dual/chain_cov.target_cov.tsv" \
-  --single-chain        "$BASE/results/single/02_chainpipeline_single/t2t.vs.single.T2T.vs.ASM.target.collinear.chain" \
-  --dual-chain          "$BASE/results/dual/02_chainpipeline_dual/t2t.vs.dual.T2T.vs.ASM.target.collinear.chain" \
-  --single-nc-chain     "$BASE/results/single/02_chainpipeline_single/t2t.vs.single.T2T.vs.ASM.target.non-collinear.chain" \
-  --dual-nc-chain       "$BASE/results/dual/02_chainpipeline_dual/t2t.vs.dual.T2T.vs.ASM.target.non-collinear.chain" \
-  --single-unlocs-chain "$BASE/results/single/02_chainpipeline_single/t2t.vs.single.T2T.vs.ASM.unloc.rbest.chain" \
-  --dual-unlocs-chain   "$BASE/results/dual/02_chainpipeline_dual/t2t.vs.dual.T2T.vs.ASM.unloc.rbest.chain" \
-  --ont-dual-chain      "$BASE/results/ont/02_chainpipeline_ont/t2t.vs.ont.T2T.vs.ASM.target.collinear.chain" \
-  --ont-dual-nc-chain   "$BASE/results/ont/02_chainpipeline_ont/t2t.vs.ont.T2T.vs.ASM.target.non-collinear.chain" \
-  --single-pairs        "$BASE/results/single/02_chainpipeline_single/t2t.vs.single.best_chrom_pairs.tsv" \
-  --dual-pairs          "$BASE/results/dual/02_chainpipeline_dual/t2t.vs.dual.best_chrom_pairs.tsv" \
-  --single-bed          "$BASE/results/single/05_hapmers_single/single.switch_blocks.final.bed" \
-  --dual-bed            "$BASE/results/dual/05_hapmers_dual/dual.switch_blocks.final.bed" \
-  --single-telomere-presence "$BASE/results/single/04_telomeres_single/single_telomere_presence.tsv" \
-  --dual-telomere-presence   "$BASE/results/dual/04_telomeres_dual/dual_telomere_presence.tsv" \
-  --ont-telomere-presence    "$BASE/results/ont/04_telomeres_ont/ont_telomere_presence.tsv" \
-  --output              "$STATS_PREFIX"
-
-# =============================================================================
-# Step 2 — Plot combined multi-panel figure
-# =============================================================================
-echo "========================================================================"
-echo "Step 2: Plotting combined figure (Panels a–g)"
+echo "Plotting combined figure (Panels a–g)"
+echo "Using Stats TSV: $STATS_FILE"
 echo "========================================================================"
 $PYTHON "$SCRIPT_DIR/plot_combined_figure.py" \
-  --single-tsv          "$BASE/results/single/03_coverage_single/chain_cov.target_cov.tsv" \
-  --dual-tsv            "$BASE/results/dual/03_coverage_dual/chain_cov.target_cov.tsv" \
-  --single-chain        "$BASE/results/single/02_chainpipeline_single/t2t.vs.single.T2T.vs.ASM.target.collinear.chain" \
-  --dual-chain          "$BASE/results/dual/02_chainpipeline_dual/t2t.vs.dual.T2T.vs.ASM.target.collinear.chain" \
-  --single-nc-chain     "$BASE/results/single/02_chainpipeline_single/t2t.vs.single.T2T.vs.ASM.target.non-collinear.chain" \
-  --dual-nc-chain       "$BASE/results/dual/02_chainpipeline_dual/t2t.vs.dual.T2T.vs.ASM.target.non-collinear.chain" \
-  --single-unlocs-chain "$BASE/results/single/02_chainpipeline_single/t2t.vs.single.T2T.vs.ASM.unloc.rbest.chain" \
-  --dual-unlocs-chain   "$BASE/results/dual/02_chainpipeline_dual/t2t.vs.dual.T2T.vs.ASM.unloc.rbest.chain" \
-  --single-pairs        "$BASE/results/single/02_chainpipeline_single/t2t.vs.single.best_chrom_pairs.tsv" \
-  --dual-pairs          "$BASE/results/dual/02_chainpipeline_dual/t2t.vs.dual.best_chrom_pairs.tsv" \
+  --t2t-tsv             "$BASE/results/single/03_coverage_single/03_coverage_single_strictLinearGap/collinear.single.target_cov.tsv" \
+  --single-tsv          "$BASE/results/single/03_coverage_single/03_coverage_single_strictLinearGap/collinear.single.query_cov.tsv" \
+  --dual-tsv            "$BASE/results/dual/03_coverage_dual/03_coverage_dual_strictLinearGap/collinear.dual.query_cov.tsv" \
+  --ont-tsv             "$BASE/results/ont/03_coverage_ont/03_coverage_ont_strictLinearGap/collinear.ont.query_cov.tsv" \
+  --single-pairs        "$SINGLE_CHAIN_DIR/t2t.vs.single_strictGap.best_chrom_pairs.tsv" \
+  --dual-pairs          "$DUAL_CHAIN_DIR/t2t.vs.dual_strictGap.best_chrom_pairs.tsv" \
+  --ont-pairs           "$ONT_CHAIN_DIR/t2t.vs.ont_strictGap.best_chrom_pairs.tsv" \
+  --single-chain        "$SINGLE_CHAIN_DIR/t2t.vs.single_strictGap.T2T.vs.ASM.target.collinear.chain" \
+  --single-nc-chain     "$SINGLE_CHAIN_DIR/t2t.vs.single_strictGap.T2T.vs.ASM.target.non-collinear.chain" \
+  --dual-chain          "$DUAL_CHAIN_DIR/t2t.vs.dual_strictGap.T2T.vs.ASM.target.collinear.chain" \
+  --dual-nc-chain       "$DUAL_CHAIN_DIR/t2t.vs.dual_strictGap.T2T.vs.ASM.target.non-collinear.chain" \
+  --ont-chain           "$ONT_CHAIN_DIR/t2t.vs.ont_strictGap.T2T.vs.ASM.target.collinear.chain" \
+  --ont-nc-chain        "$ONT_CHAIN_DIR/t2t.vs.ont_strictGap.T2T.vs.ASM.target.non-collinear.chain" \
+  --single-rec-chain    "$BASE/results/single/02_chainpipeline_single/02_chainpipeline_uncovered_single/asm_recovered_uncovered.chain" \
+  --dual-rec-chain      "$BASE/results/dual/02_chainpipeline_dual/02_chainpipeline_uncovered_dual/asm_recovered_uncovered.chain" \
+  --ont-rec-chain       "$BASE/results/ont/02_chainpipeline_ont/02_chainpipeline_uncovered_ont/asm_recovered_uncovered.chain" \
+  --single-gaps         "$BASE/results/single/06_gaps_single/single_combined.renamed.sorted.reoriented.annotated.gaps.bed" \
+  --dual-gaps           "$BASE/results/dual/06_gaps_dual/dual_combined.renamed.sorted.reoriented.annotated.gaps.bed" \
+  --ont-gaps            "$BASE/results/ont/06_gaps_ont/asm3_ONT_combined.sorted.reoriented.annotated.gaps.bed" \
   --single-bed          "$BASE/results/single/05_hapmers_single/single.switch_blocks.final.bed" \
   --dual-bed            "$BASE/results/dual/05_hapmers_dual/dual.switch_blocks.final.bed" \
-  --ont-dual-chain      "$BASE/results/ont/02_chainpipeline_ont/t2t.vs.ont.T2T.vs.ASM.target.collinear.chain" \
-  --ont-dual-nc-chain   "$BASE/results/ont/02_chainpipeline_ont/t2t.vs.ont.T2T.vs.ASM.target.non-collinear.chain" \
-  --ont-dual-pairs      "$BASE/results/ont/02_chainpipeline_ont/t2t.vs.ont.best_chrom_pairs.tsv" \
-  --single-telomere-presence "$BASE/results/single/04_telomeres_single/single_telomere_presence.tsv" \
-  --dual-telomere-presence   "$BASE/results/dual/04_telomeres_dual/dual_telomere_presence.tsv" \
-  --ont-telomere-presence    "$BASE/results/ont/04_telomeres_ont/ont_telomere_presence.tsv" \
-  --single-coverage-summary  "$BASE/results/single/03_coverage_single/single.coverage_summary.tsv" \
-  --dual-coverage-summary    "$BASE/results/dual/03_coverage_dual/dual.coverage_summary.tsv" \
-  --ont-coverage-summary     "$BASE/results/ont/03_coverage_ont/ont.coverage_summary.tsv" \
-  --single-annotated-gaps    "$BASE/results/single/06_gaps_single/single_combined.renamed.sorted.reoriented.annotated.gaps.bed" \
-  --dual-annotated-gaps      "$BASE/results/dual/06_gaps_dual/dual_combined.renamed.sorted.reoriented.annotated.gaps.bed" \
-  --ont-annotated-gaps       "$BASE/results/ont/06_gaps_ont/asm3_ONT_combined.sorted.reoriented.annotated.gaps.bed" \
+  --ont-bed             "$BASE/results/ont/05_hapmers_ont/ont.switch_blocks.final.bed" \
+  --single-telomeres    "$BASE/results/single/04_telomeres_single/single_telomere_presence.tsv" \
+  --dual-telomeres      "$BASE/results/dual/04_telomeres_dual/dual_telomere_presence.tsv" \
+  --ont-telomeres       "$BASE/results/ont/04_telomeres_ont/ont_telomere_presence.tsv" \
+  --single-cov-sum      "$BASE/results/single/03_coverage_single/03_coverage_single_strictLinearGap/single.coverage_summary.tsv" \
+  --dual-cov-sum        "$BASE/results/dual/03_coverage_dual/03_coverage_dual_strictLinearGap/dual.coverage_summary.tsv" \
+  --ont-cov-sum         "$BASE/results/ont/03_coverage_ont/03_coverage_ont_strictLinearGap/ont.coverage_summary.tsv" \
   --telo-p-bed          "$PBED" \
   --centromeres         "$CEN" \
-  --stats-tsv           "${STATS_PREFIX}_wide.tsv" \
+  --stats-tsv           "$STATS_FILE" \
   --annotation-tsv      "$ANNOT" \
   --output              "$OUT" \
-  --no-timestamp \
-  --style               paper \
-  --format              png \
-  --simplify
+  --dpi                 300
 
 echo "========================================================================"
 echo "Done!"
 echo "Generated files:"
-echo "  Stats TSV (wide): ${STATS_PREFIX}_wide.tsv"
-echo "  Stats TSV (long): ${STATS_PREFIX}_long.tsv"
 echo "  Figure (PNG):     ${OUT}.png"
 echo "  Figure (PDF):     ${OUT}.pdf"
-echo "  Figure (SVG):     ${OUT}.svg"
 echo "========================================================================"
