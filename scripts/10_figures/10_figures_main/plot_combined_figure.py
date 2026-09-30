@@ -20,6 +20,7 @@ import argparse
 import re
 import os
 from collections import defaultdict
+import math
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -80,8 +81,8 @@ _EF_ASM_COLORS = {
 
 # Chromosome subsets for Main Figure
 MACRO_TOKENS = ['3', '4', 'W']
-MICRO_TOKENS = ['11', '14', '16']
-DOT_TOKENS   = ['25', '30', '35', '37']
+MICRO_TOKENS = ['11', '14', '22']
+DOT_TOKENS   = ['16', '25', '35', '37']
 
 # =============================================================================
 # Helper Utilities & Loaders
@@ -404,16 +405,16 @@ def is_pat(name):
     return 'Pat' in name
 
 def classify_chrom_group(token):
-    m = re.match(r'^(\d+)', token)
-    if m:
-        n = int(m.group(1))
-        if n in (1, 2, 3, 4, 5):
-            return 'macro'
-        if 6 <= n <= 20:
-            return 'micro'
-        return 'dot'
-    if token in ('Z', 'W'):
+    tok = str(token).upper().replace('CHR', '')
+    macro_set = {'1', '1A', '2', '3', '4', '4A', '5', '6', '7', '8', 'W', 'Z'}
+    micro_set = {'9', '10', '11', '12', '13', '14', '15', '17', '18', '19', '20', '21', '22', '23', '24', '26', '27', '28'}
+    dot_set   = {'16', '25', '29', '30', '31', '32', '33', '34', '35', '36', '37'}
+    if tok in macro_set:
         return 'macro'
+    if tok in micro_set:
+        return 'micro'
+    if tok in dot_set:
+        return 'dot'
     return 'dot'
 
 # =============================================================================
@@ -539,6 +540,10 @@ def draw_synteny_panel(ax_chr, ax_mat, ax_pat, tokens, max_global_size,
     ROW_H     = 3 * BLOCK_H + ROW_GAP                           # 2.62
     total_h   = len(tokens) * ROW_H + 0.35
 
+    ax_chr.set_zorder(50)
+    ax_mat.set_zorder(20)
+    ax_pat.set_zorder(20)
+
     for ax in (ax_chr, ax_mat, ax_pat):
         ax.set_ylim(-0.35, total_h)
         ax.set_yticks([])
@@ -573,11 +578,11 @@ def draw_synteny_panel(ax_chr, ax_mat, ax_pat, tokens, max_global_size,
             ax_mat.axhline(y_div, color='#E2E8F0', lw=0.5, ls=':')
             ax_pat.axhline(y_div, color='#E2E8F0', lw=0.5, ls=':')
 
-        # Chromosome label in Col 0 (ax_chr) - increased font 2 pt
+        # Chromosome label in Col 0 (ax_chr) - elevated to foreground zorder 100
         lbl_text = f"chr{tok}"
         y_mid_row = y_row_top - 1.5 * BLOCK_H + BLOCK_GAP / 2
-        ax_chr.text(0.60, y_mid_row, lbl_text, ha='center', va='center',
-                    fontsize=10.5, fontweight='bold', color='#0F172A')
+        ax_chr.text(0.50, y_mid_row, lbl_text, ha='center', va='center',
+                    fontsize=10.5, fontweight='bold', color='#0F172A', zorder=100, clip_on=False)
 
         assemblies = [
             ('HiFi Single', single_data, COL_COV_S_DARK, COL_RIB_NC),
@@ -1226,8 +1231,13 @@ def _load_annotation_tsv(path):
 def _draw_panel_g(ax_left, ax_right, annotation_df):
     """
     Draws Frameshifts (%) and Premature stop codons (%) bar charts spanning the full width
-    with PCG counts placed directly at the top of each corresponding bar.
+    with a structured top-to-bottom layout:
+      1. Subplot title (top)
+      2. Protein-coding genes row ('N:' label + counts horizontally aligned over each bar)
+      3. Bar plot with simplified haplotype x-ticks ('H1', 'H2', 'H1', 'H2')
     """
+    import matplotlib.transforms as mtransforms
+
     _G_ROW_SPECS = [('HiFi', 'hap1'), ('HiFi', 'hap2'), ('ONT', 'hap1'), ('ONT', 'hap2')]
     _GX = {('HiFi', 'hap1'): 0.00, ('HiFi', 'hap2'): 0.74, ('ONT', 'hap1'): 1.91, ('ONT', 'hap2'): 2.65}
     xlim_bars = (-0.46, 3.11)
@@ -1255,7 +1265,7 @@ def _draw_panel_g(ax_left, ax_right, annotation_df):
             ].empty
         ]
         v_max    = max(vals) if vals else 1.0
-        ylim_max = float(int(np.ceil(v_max * 1.35 / tick_step)) * tick_step)
+        ylim_max = float(int(np.ceil(v_max * 1.18 / tick_step)) * tick_step)
         yticks   = list(np.round(np.arange(0, ylim_max + tick_step * 0.5, tick_step), 10))
 
         ax.set_xlim(*xlim_bars)
@@ -1273,10 +1283,19 @@ def _draw_panel_g(ax_left, ax_right, annotation_df):
         ax.tick_params(axis='y', length=2.0, width=0.4, labelsize=fs_tick, pad=1.5)
         ax.set_facecolor('none')
 
-        ax.set_title(title, fontsize=fs_title, pad=3, fontweight='bold', loc='center', color='#0F172A')
-        ax.plot([0, 1], [1, 1], transform=ax.transAxes, color='#333333', lw=0.25, clip_on=False)
+        # 1. Title at top
+        ax.text(0.5, 1.25, title, transform=ax.transAxes, ha='center', va='center',
+                fontsize=fs_title, fontweight='bold', color='#0F172A')
 
-        # Plot bars and place PCG numbers at the top of the bars
+        # 2. Row of Protein-Coding Genes (PCG / N)
+        trans_blended = mtransforms.blended_transform_factory(ax.transData, ax.transAxes)
+        ax.text(-0.02, 1.08, 'N:', transform=ax.transAxes, ha='right', va='center',
+                fontsize=7.8, fontweight='bold', color='#475569')
+
+        # Divider top line above bar plot
+        ax.plot([0, 1], [1.0, 1.0], transform=ax.transAxes, color='#E2E8F0', lw=0.4, clip_on=False)
+
+        # 3. Bar plot
         for tech, hap in _G_ROW_SPECS:
             row = annotation_df.loc[
                 (annotation_df['technology'] == tech) &
@@ -1291,15 +1310,15 @@ def _draw_panel_g(ax_left, ax_right, annotation_df):
             else:
                 ax.bar(x, v, width=bar_w, facecolor='white', edgecolor='black', lw=0.5, hatch='////', zorder=3)
 
-            # Add PCG count at the top of the bar
+            # Gene count in the dedicated N: row
             if col_pcg:
                 pcg_val = int(float(str(row[col_pcg].iloc[0]).replace(',', '')))
-                ax.text(x, v + ylim_max * 0.03, f"{pcg_val:,}", ha='center', va='bottom',
-                        fontsize=7.8, fontweight='bold', color='#1E293B', zorder=5)
+                ax.text(x, 1.08, f"{pcg_val:,}", transform=trans_blended, ha='center', va='center',
+                        fontsize=7.6, fontweight='bold', color='#1E293B', clip_on=False)
 
-        # X-tick labels under bars
+        # X-tick labels under bars (technology removed -> H1, H2, H1, H2)
         xtick_locs = [_GX[spec] for spec in _G_ROW_SPECS]
-        xtick_lbls = [f"{tech} H{hap[-1]}" for tech, hap in _G_ROW_SPECS]
+        xtick_lbls = [f"H{hap[-1]}" for _, hap in _G_ROW_SPECS]
         ax.set_xticks(xtick_locs)
         ax.set_xticklabels(xtick_lbls, fontsize=7.8, rotation=0, ha='center', color='#1E293B')
         ax.tick_params(axis='x', length=0, pad=2)
@@ -1452,28 +1471,27 @@ def build_combined_figure(t2t_sizes, centromeres, p_arm_dict, t2t_telo,
 
     max_mac = get_max_size(MACRO_TOKENS)
     max_mic = get_max_size(MICRO_TOKENS)
-    max_dot = get_max_size(DOT_TOKENS)
+    max_dot = int(math.ceil(get_max_size(DOT_TOKENS) / 2_000_000.0) * 2_000_000)
 
-    fig_w = 14.5
-    fig_h = 18.5
+    fig_w = 14.0
+    fig_h = 14.5
     fig = plt.figure(figsize=(fig_w, fig_h), facecolor='white')
 
     # Vertical Height Ratios:
-    # Row 0: Top stats (a, b, c) -> 0.95 (compact)
-    # Rows 1–2: Macro & Micro (d, e) -> 2.35 each (3 chromosomes each)
-    # Row 3: Dot (f) -> 2.95 (4 chromosomes)
-    # Row 4: Panel g + Legend -> 0.55 (compact)
-    outer = GridSpec(5, 1, figure=fig,
-                     height_ratios=[0.95, 2.35, 2.35, 2.95, 0.55],
-                     hspace=0.15,
+    # Row 0: Top stats (a, b, c) -> 0.375 (37.5% of synteny row height)
+    # Row 1: Macro (d) -> 1.00 (Full width)
+    # Row 2: Micro (e, 60%) + Dot (f, 40%) -> 1.00
+    # Row 3: Panel g + Legend -> 0.30 (30% of synteny row height)
+    outer = GridSpec(4, 1, figure=fig,
+                     height_ratios=[0.375, 1.00, 1.00, 0.30],
+                     hspace=0.22,
                      left=0.04, right=0.98, top=0.97, bottom=0.03)
 
-    # ── Row 0: Panels a, b, c (Compact Top Row) ─────────────────────────────
+    # ── Row 0: Panels a, b, c (Expanded Top Row) ────────────────────────────
     inner_top = GridSpecFromSubplotSpec(1, 2, subplot_spec=outer[0, 0],
                                         width_ratios=[0.30, 0.70], wspace=0.10)
     ax_cov = fig.add_subplot(inner_top[0, 1])
 
-    # Panel a reduced by 40% (height ratio 1.3 to 1.0)
     inner_stats = GridSpecFromSubplotSpec(2, 1, subplot_spec=inner_top[0, 0],
                                           height_ratios=[1.3, 1.0], hspace=0.38)
     inner_viol = GridSpecFromSubplotSpec(1, 3, subplot_spec=inner_stats[0], wspace=0.35)
@@ -1491,9 +1509,9 @@ def build_combined_figure(t2t_sizes, centromeres, p_arm_dict, t2t_telo,
     _draw_full_coverage_panel(ax_cov, all_macro, all_micro, all_dot,
                              chrom_groups, cov_sum_s, cov_sum_d, cov_sum_o)
 
-    # ── Row 1: Macrochromosomes (Panel d, Extended) ──────────────────────────
+    # ── Row 1: Macrochromosomes (Panel d, Full Width) ────────────────────────
     inner_mac = GridSpecFromSubplotSpec(1, 3, subplot_spec=outer[1, 0],
-                                        width_ratios=[0.038, 0.481, 0.481], wspace=0.015)
+                                        width_ratios=[0.046, 0.477, 0.477], wspace=0.015)
     ax_mac_chr = fig.add_subplot(inner_mac[0, 0])
     ax_mac_mat = fig.add_subplot(inner_mac[0, 1])
     ax_mac_pat = fig.add_subplot(inner_mac[0, 2])
@@ -1505,32 +1523,40 @@ def build_combined_figure(t2t_sizes, centromeres, p_arm_dict, t2t_telo,
                        single_data, dual_data, ont_data,
                        tick_step=10_000_000, tick_unit_mb=True)
 
-    # ── Row 2: Microchromosomes (Panel e, Extended) ──────────────────────────
-    inner_mic = GridSpecFromSubplotSpec(1, 3, subplot_spec=outer[2, 0],
-                                        width_ratios=[0.038, 0.481, 0.481], wspace=0.015)
+    # ── Row 2: Microchromosomes (Panel e, 60%) + Dot chromosomes (Panel f, 40%) ──
+    inner_row2 = GridSpecFromSubplotSpec(1, 2, subplot_spec=outer[2, 0],
+                                         width_ratios=[0.60, 0.40], wspace=0.07)
+
+    # Microchromosomes (Panel e)
+    inner_mic = GridSpecFromSubplotSpec(1, 3, subplot_spec=inner_row2[0, 0],
+                                        width_ratios=[0.056, 0.472, 0.472], wspace=0.015)
     ax_mic_chr = fig.add_subplot(inner_mic[0, 0])
     ax_mic_mat = fig.add_subplot(inner_mic[0, 1])
     ax_mic_pat = fig.add_subplot(inner_mic[0, 2])
+    ax_mic_mat.set_title('Maternal', fontsize=11.0, fontweight='bold', pad=4, color='#1E293B')
+    ax_mic_pat.set_title('Paternal', fontsize=11.0, fontweight='bold', pad=4, color='#1E293B')
 
     draw_synteny_panel(ax_mic_chr, ax_mic_mat, ax_mic_pat, MICRO_TOKENS, max_mic,
                        t2t_sizes, centromeres, t2t_telo, flip_set,
                        single_data, dual_data, ont_data,
                        tick_step=2_000_000, tick_unit_mb=True)
 
-    # ── Row 3: Dot chromosomes (Panel f, Extended) ───────────────────────────
-    inner_dot = GridSpecFromSubplotSpec(1, 3, subplot_spec=outer[3, 0],
-                                        width_ratios=[0.038, 0.481, 0.481], wspace=0.015)
+    # Dot chromosomes (Panel f)
+    inner_dot = GridSpecFromSubplotSpec(1, 3, subplot_spec=inner_row2[0, 1],
+                                        width_ratios=[0.070, 0.465, 0.465], wspace=0.015)
     ax_dot_chr = fig.add_subplot(inner_dot[0, 0])
     ax_dot_mat = fig.add_subplot(inner_dot[0, 1])
     ax_dot_pat = fig.add_subplot(inner_dot[0, 2])
+    ax_dot_mat.set_title('Maternal', fontsize=11.0, fontweight='bold', pad=4, color='#1E293B')
+    ax_dot_pat.set_title('Paternal', fontsize=11.0, fontweight='bold', pad=4, color='#1E293B')
 
     draw_synteny_panel(ax_dot_chr, ax_dot_mat, ax_dot_pat, DOT_TOKENS, max_dot,
                        t2t_sizes, centromeres, t2t_telo, flip_set,
                        single_data, dual_data, ont_data,
-                       tick_step=1_000_000, tick_unit_mb=True)
+                       tick_step=2_000_000, tick_unit_mb=True)
 
-    # ── Row 4: Panel g (Left 44%) + Legend Card (Right 56%) (Compact) ────────
-    inner_bot = GridSpecFromSubplotSpec(1, 2, subplot_spec=outer[4, 0],
+    # ── Row 3: Panel g (Left 44%) + Legend Card (Right 56%) ──────────────────
+    inner_bot = GridSpecFromSubplotSpec(1, 2, subplot_spec=outer[3, 0],
                                         width_ratios=[0.44, 0.56], wspace=0.06)
 
     # Left: Panel g with 2 full-width barplots
@@ -1542,7 +1568,7 @@ def build_combined_figure(t2t_sizes, centromeres, p_arm_dict, t2t_telo,
     if annotation_df is not None:
         _draw_panel_g(ax_g_left, ax_g_right, annotation_df)
 
-    # Right: Neater, Tidier Publication Legend Card
+    # Right: Publication Legend Card
     ax_leg = fig.add_subplot(inner_bot[0, 1])
     _draw_legend_card(ax_leg)
 
@@ -1556,7 +1582,7 @@ def build_combined_figure(t2t_sizes, centromeres, p_arm_dict, t2t_telo,
         ('f', ax_dot_chr,       -0.45, 1.02),
     ]
     if annotation_df is not None:
-        panel_letters.append(('g', ax_g_left, -0.25, 1.08))
+        panel_letters.append(('g', ax_g_left, -0.25, 1.25))
 
     for tag, ax_ref, lx, ly in panel_letters:
         ax_ref.text(lx, ly, tag, transform=ax_ref.transAxes,
