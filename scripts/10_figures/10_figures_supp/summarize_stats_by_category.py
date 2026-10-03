@@ -214,29 +214,17 @@ def _build_liftover(chain_path):
     }
 
 
-def compute_switch_bp(pairs_path, bed_path, chain_path, seq_sizes):
+def compute_switch_bp(pairs_path, bed_path, chain_path=None, seq_sizes=None):
     pairs = _load_pairs(pairs_path)
     switches = _load_switch_bed(bed_path)
-    liftover = _build_liftover(chain_path)
 
-    result = {nm: 0 for nm in seq_sizes}
+    result = {nm: 0 for nm in seq_sizes} if seq_sizes else {}
     for t2t_name, scaffold in pairs.items():
         raw = switches.get(scaffold, [])
-        chain_blocks = liftover.get(scaffold, {}).get(t2t_name, [])
-        if not raw or not chain_blocks:
-            continue
-        t2t_ivs = []
-        for h_s, h_e in raw:
-            for q_s, q_e, t_start in chain_blocks:
-                ov_s = max(h_s, q_s)
-                ov_e = min(h_e, q_e)
-                if ov_s >= ov_e:
-                    continue
-                offset = ov_s - q_s
-                t2t_ivs.append((t_start + offset, t_start + offset + (ov_e - ov_s)))
-        if t2t_ivs:
-            result[t2t_name] = _bp(_merge(t2t_ivs))
+        if raw:
+            result[t2t_name] = result.get(t2t_name, 0) + _bp(_merge(raw))
     return result
+
 
 
 def load_telomere_presence_tsv(path):

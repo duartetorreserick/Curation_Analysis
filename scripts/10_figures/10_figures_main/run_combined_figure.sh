@@ -92,9 +92,9 @@ $PYTHON "$SCRIPT_DIR/plot_combined_figure.py" \
   --single-gaps         "$BASE/results/single/06_gaps_single/single_combined.renamed.sorted.reoriented.annotated.gaps.bed" \
   --dual-gaps           "$BASE/results/dual/06_gaps_dual/dual_combined.renamed.sorted.reoriented.annotated.gaps.bed" \
   --ont-gaps            "$BASE/results/ont/06_gaps_ont/asm3_ONT_combined.sorted.reoriented.annotated.gaps.bed" \
-  --single-bed          "$BASE/results/single/05_hapmers_single/single.switch_blocks.final.bed" \
-  --dual-bed            "$BASE/results/dual/05_hapmers_dual/dual.switch_blocks.final.bed" \
-  --ont-bed             "$BASE/results/ont/05_hapmers_ont/ont.switch_blocks.final.bed" \
+  --single-bed          "$BASE/results/single/05_hapmers_single/single.switch_blocks.final.reoriented.bed" \
+  --dual-bed            "$BASE/results/dual/05_hapmers_dual/dual.switch_blocks.final.reoriented.bed" \
+  --ont-bed             "$BASE/results/ont/05_hapmers_ont/ont.switch_blocks.final.reoriented.bed" \
   --single-telomeres    "$BASE/results/single/04_telomeres_single/single_telomere_presence.tsv" \
   --dual-telomeres      "$BASE/results/dual/04_telomeres_dual/dual_telomere_presence.tsv" \
   --ont-telomeres       "$BASE/results/ont/04_telomeres_ont/ont_telomere_presence.tsv" \

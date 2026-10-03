@@ -226,6 +226,116 @@ def load_switch_blocks(bed_path):
                 sw[p[0]].append((int(p[1]), int(p[2])))
     return sw
 
+def load_telomere_counts_by_category(tsv_path):
+    """
+    Returns counts of chromosomes with 0, 1, or 2 telomeres grouped by:
+    (category, haplotype) -> {0: count, 1: count, 2: count}
+    """
+    telo_counts = defaultdict(lambda: {0: 0, 1: 0, 2: 0})
+    if not tsv_path or not os.path.exists(tsv_path):
+        return telo_counts
+    with open(tsv_path) as f:
+        hdr = None
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'): continue
+            p = line.split('\t')
+            if not hdr:
+                hdr = [x.lower() for x in p]
+                continue
+            row = dict(zip(hdr, p))
+            chrom = row.get('chromosome') or row.get('chrom') or row.get('name')
+            if not chrom: continue
+            tok = chrom_token(chrom)
+            if tok == 'Z':
+                side = 'pat'
+            elif tok == 'W':
+                side = 'mat'
+            else:
+                side = 'pat' if ('pat' in chrom.lower() or is_pat(chrom)) else 'mat'
+            hap = side
+            cat = classify_chrom_group(tok)
+
+            arms = set()
+            col_val = (row.get('collinear') or '').lower()
+            nc_val = (row.get('non-collinear') or row.get('noncollinear') or '').lower()
+            for val in (col_val, nc_val):
+                if val and val != 'none':
+                    if 'p' in val: arms.add('p')
+                    if 'q' in val: arms.add('q')
+
+            res_flag = (row.get('teloscope_rescued') or '').lower()
+            res_val = (row.get('type_of_tele_rescued') or '').lower()
+            if res_flag == 'yes' and res_val and res_val != 'none':
+                if 'p' in res_val: arms.add('p')
+                if 'q' in res_val: arms.add('q')
+
+            cnt = min(len(arms), 2)
+            telo_counts[(cat, hap)][cnt] += 1
+    return telo_counts
+
+def aggregate_switch_blocks(asm_data):
+    """
+    Aggregates switch block counts and lengths from asm_data['sw']
+    grouped by (category, haplotype) -> {'count': int, 'lengths': [int, ...]}
+    where haplotype is 'mat' or 'pat'.
+    """
+    sw_counts = defaultdict(lambda: {'count': 0, 'lengths': []})
+    scaf_to_t2t = {v: k for k, v in asm_data.get('pairs', {}).items()}
+    for scaf, intervals in asm_data.get('sw', {}).items():
+        t2t = scaf_to_t2t.get(scaf)
+        if not t2t:
+            base = scaf.split('_unloc')[0]
+            t2t = scaf_to_t2t.get(base)
+        if t2t:
+            tok = chrom_token(t2t)
+            cat = classify_chrom_group(tok)
+        else:
+            m = re.search(r'SUPER_([0-9A-Za-z]+)', scaf)
+            tok = m.group(1) if m else 'unknown'
+            cat = classify_chrom_group(tok)
+        if tok == 'Z':
+            hap = 'pat'
+        elif tok == 'W':
+            hap = 'mat'
+        else:
+            hap = 'pat' if ('Pat' in scaf or is_pat(scaf)) else 'mat'
+        for s, e in intervals:
+            sw_counts[(cat, hap)]['count'] += 1
+            sw_counts[(cat, hap)]['lengths'].append(e - s)
+    return sw_counts
+
+def aggregate_curation_joins(asm_data):
+    """
+    Aggregates curation gap counts from asm_data['gaps'] where type is 'CURATION'
+    grouped by (category, haplotype) -> int
+    where haplotype is 'mat' or 'pat'.
+    """
+    gap_counts = defaultdict(int)
+    scaf_to_t2t = {v: k for k, v in asm_data.get('pairs', {}).items()}
+    for scaf, glist in asm_data.get('gaps', {}).items():
+        t2t = scaf_to_t2t.get(scaf)
+        if not t2t:
+            base = scaf.split('_unloc')[0]
+            t2t = scaf_to_t2t.get(base)
+        if t2t:
+            tok = chrom_token(t2t)
+            cat = classify_chrom_group(tok)
+        else:
+            m = re.search(r'SUPER_([0-9A-Za-z]+)', scaf)
+            tok = m.group(1) if m else 'unknown'
+            cat = classify_chrom_group(tok)
+        if tok == 'Z':
+            hap = 'pat'
+        elif tok == 'W':
+            hap = 'mat'
+        else:
+            hap = 'pat' if ('Pat' in scaf or is_pat(scaf)) else 'mat'
+        for s, e, gt in glist:
+            if 'CURATION' in gt:
+                gap_counts[(cat, hap)] += 1
+    return gap_counts
+
 def load_telomere_presence_tsv(tsv_path):
     telo_coll = defaultdict(set)
     telo_nc   = defaultdict(set)
@@ -385,7 +495,8 @@ def load_coverage_summary(path_s=None, path_d=None, path_ont=None):
             c_pct = float(r.get('collinear_pct', 0.0))
             nc_pct = float(r.get('noncollinear_pct', 0.0))
             u_pct = float(r.get('uncovered_pct', max(0.0, 100.0 - c_pct - nc_pct)))
-            cov[nm] = (c_pct, nc_pct, u_pct)
+            sz_bp = float(r.get('size', 0.0))
+            cov[nm] = (c_pct, nc_pct, u_pct, sz_bp)
         return cov
     return _load(path_s), _load(path_d), _load(path_ont)
 
@@ -527,7 +638,8 @@ def _draw_telo_semi(ax, x, arm, yc, bar_h, rx, fc='#000000', ec='#000000', lw=0.
 def draw_synteny_panel(ax_chr, ax_mat, ax_pat, tokens, max_global_size,
                        t2t_sizes, centromeres, t2t_telo, flip_set,
                        single_data, dual_data, ont_data,
-                       tick_step=10_000_000, tick_unit_mb=True):
+                       tick_step=10_000_000, tick_unit_mb=True,
+                       min_sw_width=600_000):
     """
     Renders butterfly synteny ideograms extending fully across the canvas with increased font sizes.
     """
@@ -750,8 +862,11 @@ def draw_synteny_panel(ax_chr, ax_mat, ax_pat, tokens, max_global_size,
                     for sw_s, sw_e in asm['sw'].get(q_prim, []):
                         x0 = (q_prim_len - sw_e) if flip else sw_s
                         x1 = (q_prim_len - sw_s) if flip else sw_e
-                        w_sw = max(abs(x1 - x0), 80_000)
-                        r = mpatches.Rectangle((min(x0, x1), y_asm - H_BAR_ASM / 2),
+                        w_sw = max(abs(x1 - x0), min_sw_width)
+                        x_sw = min(x0, x1)
+                        if x_sw + w_sw > q_prim_len:
+                            x_sw = max(0, q_prim_len - w_sw)
+                        r = mpatches.Rectangle((x_sw, y_asm - H_BAR_ASM / 2),
                                                w_sw, H_BAR_ASM,
                                                fc=COL_SWITCH, ec='none', zorder=8)
                         r.set_clip_path(prim_path, transform=ax.transData)
@@ -921,7 +1036,7 @@ def compute_avg_coverage_by_method(group_order, chrom_groups,
             c_sum, nc_sum, u_sum, n = 0.0, 0.0, 0.0, 0
             for nm in members:
                 if nm in cov_summary:
-                    c, nc, u = cov_summary[nm]
+                    c, nc, u = cov_summary[nm][:3]
                     c_sum += c; nc_sum += nc; u_sum += u; n += 1
             if n > 0:
                 avg[tok] = (c_sum / n, nc_sum / n, u_sum / n)
@@ -1021,9 +1136,104 @@ def _draw_full_coverage_panel(ax, all_macro_order, all_micro_order, all_nano_ord
     ax.spines['left'].set_linewidth(0.4)
     ax.spines['bottom'].set_linewidth(0.4)
 
-def _draw_panel_d_violin(axes_by_cat, all_macro_order, all_micro_order, all_nano_order,
-                          chrom_groups, cov_summary_s, cov_summary_d,
-                          cov_summary_ont=None):
+def _draw_panel_a_stacked_bars(axes_by_cat, all_macro_order, all_micro_order, all_nano_order,
+                               chrom_groups, cov_summary_s, cov_summary_d,
+                               cov_summary_ont=None, hide_xticks=True):
+    """
+    Panel A: Collinear and Non-collinear coverage (%) stacked bars
+    across chromosome categories (Macro, Micro, Dot) and assemblies (Single, Dual, ONT).
+    Stacked bars:
+      - Bottom: Collinear coverage (%) colored by dark assembly color
+      - Top: Non-collinear coverage (%) colored by light assembly color
+    """
+    group_specs = [
+        ('Macro', all_macro_order),
+        ('Micro', all_micro_order),
+        ('Dot',   all_nano_order),
+    ]
+    method_info = [
+        ('Single',   cov_summary_s,   COL_COV_S_DARK, COL_COV_S_LIGHT),
+        ('Dual',     cov_summary_d,   COL_COV_D_DARK, COL_COV_D_LIGHT),
+        ('ONT_Dual', cov_summary_ont, COL_COV_O_DARK, COL_COV_O_LIGHT),
+    ]
+
+    bar_w = 0.48
+    x_positions = [0.0, 1.0, 2.0]  # Single, Dual, ONT
+
+    for gi, (gname, tokens) in enumerate(group_specs):
+        ax = axes_by_cat.get(gname)
+        if ax is None:
+            continue
+
+        for mi, (mname, cov_dict, col_asm_dark, col_asm_light) in enumerate(method_info):
+            x = x_positions[mi]
+            # Compute category base-pair weighted collinear and non-collinear coverage
+            tot_sz, tot_coll_bp, tot_noncoll_bp = 0.0, 0.0, 0.0
+            for tok in tokens:
+                for nm in chrom_groups.get(tok, []):
+                    if cov_dict and nm in cov_dict:
+                        entry = cov_dict[nm]
+                        coll = entry[0]
+                        noncoll = entry[1]
+                        sz_bp = entry[3] if len(entry) > 3 else 1.0
+                        tot_sz += sz_bp
+                        tot_coll_bp += (coll / 100.0) * sz_bp
+                        tot_noncoll_bp += (noncoll / 100.0) * sz_bp
+
+            avg_coll = (tot_coll_bp / tot_sz * 100.0) if tot_sz > 0 else 0.0
+            avg_noncoll = (tot_noncoll_bp / tot_sz * 100.0) if tot_sz > 0 else 0.0
+
+            # Collinear coverage bar (bottom)
+            ax.bar(x, avg_coll, width=bar_w, color=col_asm_dark, edgecolor=col_asm_dark, lw=0.6, zorder=2)
+            # Non-collinear coverage bar (stacked on top using light assembly color)
+            if avg_noncoll > 0:
+                ax.bar(x, avg_noncoll, bottom=avg_coll, width=bar_w, color=col_asm_light,
+                       edgecolor=col_asm_dark, lw=0.4, zorder=2)
+
+            # Text label above bar showing collinear %
+            tot_cov = avg_coll + avg_noncoll
+            if tot_cov > 0:
+                ax.text(x, min(tot_cov + 1.8, 103.5), f"{avg_coll:.1f}%", ha='center', va='bottom',
+                        fontsize=5.8, fontweight='bold', color='#0F172A', zorder=6)
+
+        ax.set_xticks(x_positions)
+        if hide_xticks:
+            ax.set_xticklabels([])
+        else:
+            ax.set_xticklabels(['Single', 'Dual', 'ONT'], fontsize=7.2)
+
+        ax.set_xlim(-0.55, 2.55)
+        ax.set_ylim(0, 115)
+        ax.set_yticks([0, 25, 50, 75, 100])
+        ax.set_facecolor('white')
+
+        ax.set_title(gname, fontsize=8.5, fontweight='bold', pad=3)
+        ax.tick_params(axis='x', length=0, pad=1.5)
+        ax.tick_params(axis='y', colors='black', labelsize=7.2, length=2.0)
+
+        if gi == 0:
+            ax.set_ylabel('Coverage (%)', fontsize=8.0, labelpad=2, color='black')
+            ax.spines['left'].set_color('black')
+        else:
+            ax.tick_params(labelleft=False)
+
+        for spine in ['top', 'right']:
+            ax.spines[spine].set_visible(False)
+        ax.spines['left'].set_linewidth(0.4)
+        ax.spines['left'].set_color('black')
+        ax.spines['bottom'].set_linewidth(0.4)
+        ax.spines['bottom'].set_color('black')
+
+def _draw_panel_c_violin(axes_by_cat, all_macro_order, all_micro_order, all_nano_order,
+                         chrom_groups, cov_summary_s, cov_summary_d,
+                         cov_summary_ont=None):
+    """
+    Panel C: Split half-violin per category with zoomed y-range.
+    axes_by_cat: dict {'Macro': ax, 'Micro': ax, 'Dot': ax}
+    Left half = maternal, right half = paternal chromosomes.
+    Y-value = collinear coverage only. Zoomed per group.
+    All chromosomes shown as dots; outliers labelled with chromosome token.
+    """
     group_specs = [
         ('Macro', all_macro_order),
         ('Micro', all_micro_order),
@@ -1041,11 +1251,9 @@ def _draw_panel_d_violin(axes_by_cat, all_macro_order, all_micro_order, all_nano
             mat_vals, pat_vals = [], []
             for tok in tokens:
                 for nm in chrom_groups.get(tok, []):
-                    if cov_dict and nm in cov_dict:
-                        coll, _, _ = cov_dict[nm]
-                        val = coll
-                    else:
-                        val = 0.0
+                    if not cov_dict or nm not in cov_dict:
+                        continue
+                    val = cov_dict[nm][0]
                     (pat_vals if is_pat(nm) else mat_vals).append((val, tok))
             vdata[(gname, mname)] = {'mat': mat_vals, 'pat': pat_vals}
 
@@ -1061,6 +1269,21 @@ def _draw_panel_d_violin(axes_by_cat, all_macro_order, all_micro_order, all_nano
     x_max = x
 
     np.random.seed(42)
+
+    _DOT_LABEL_TOKS = ('30', '25')
+    _dot_force = {}
+    for mname, cov_dict, _ in method_info:
+        if mname == 'ONT_Dual':
+            _dot_force[(mname, 'mat')] = set(_DOT_LABEL_TOKS)
+            _dot_force[(mname, 'pat')] = set()
+        else:
+            mat_force, pat_force = set(), set()
+            for tok_check in _DOT_LABEL_TOKS:
+                mat_v = next((v for v, t in vdata[('Dot', mname)]['mat'] if t == tok_check), 0.0)
+                pat_v = next((v for v, t in vdata[('Dot', mname)]['pat'] if t == tok_check), 0.0)
+                (mat_force if mat_v >= pat_v else pat_force).add(tok_check)
+            _dot_force[(mname, 'mat')] = mat_force
+            _dot_force[(mname, 'pat')] = pat_force
 
     for gi, (gname, _) in enumerate(group_specs):
         ax = axes_by_cat.get(gname)
@@ -1086,11 +1309,13 @@ def _draw_panel_d_violin(axes_by_cat, all_macro_order, all_micro_order, all_nano
         ax.set_ylim(y_lo, y_hi + (y_hi - y_lo) * 0.06)
         ax.set_facecolor('white')
 
-        def _hv(vals_toks, xc, side, color, _ax=ax, _y_lo=y_lo, _y_hi=y_hi):
+        def _hv(vals_toks, xc, side, color, force_toks=None,
+                _ax=ax, _y_lo=y_lo, _y_hi=y_hi):
             if not vals_toks:
-                return []
+                return
             vals = np.array([v for v, _ in vals_toks], dtype=float)
             toks = [t for _, t in vals_toks]
+
             bx0 = xc - half_w if side == 'left' else xc
             bx1 = xc          if side == 'left' else xc + half_w
             wx  = (bx0 + bx1) / 2
@@ -1119,104 +1344,372 @@ def _draw_panel_d_violin(axes_by_cat, all_macro_order, all_micro_order, all_nano
 
             _ax.add_patch(mpatches.Polygon(
                 list(zip(poly_x, poly_y)), closed=True,
-                fc=color, ec=color, lw=0.35, alpha=0.28, zorder=3))
+                fc=color, ec=color, lw=0.3, alpha=0.28, zorder=3))
             _ax.plot(outer_x, y_grid, color=color, lw=0.5, alpha=0.75, zorder=4)
 
             q2 = float(np.median(vals))
             _ax.plot([bx0, bx1], [q2, q2], color=COL_BORDER, lw=0.8, zorder=5)
 
             jitter = np.random.uniform(-(half_w * 0.38), half_w * 0.38, len(vals))
-            xpts = np.clip(wx + jitter, bx0 + 0.005, bx1 - 0.005)
-            _ax.scatter(xpts, vals, color=color, s=2.5, zorder=5, ec='none', alpha=0.65)
-            return list(zip(xpts, vals, toks, [side] * len(vals)))
+            xpts      = np.clip(wx + jitter, bx0 + 0.005, bx1 - 0.005)
+            lbl_set   = force_toks or set()
+            lbl_mask  = [tok in lbl_set for tok in toks]
+
+            for xi, yi, is_lbl in zip(xpts, vals, lbl_mask):
+                if not is_lbl:
+                    _ax.scatter(xi, yi, color=color, s=2.5,
+                                zorder=5, ec='none', alpha=0.55)
+            for xi, yi, tok, is_lbl in zip(xpts, vals, toks, lbl_mask):
+                if is_lbl:
+                    _ax.scatter(xi, yi, color=color, s=7,
+                                zorder=7, ec='white', linewidths=0.25)
+                    y_off = (_y_hi - _y_lo) * 0.04
+                    _ax.text(xi, yi - y_off, tok,
+                             ha='center', va='top',
+                             fontsize=5.2, color=color, zorder=8)
 
         for mname, _, color in method_info:
-            xc = meth_centers[mname]
+            xc    = meth_centers[mname]
             sides = vdata[(gname, mname)]
-            pts_mat = _hv(sides['mat'], xc, 'left',  color)
-            pts_pat = _hv(sides['pat'], xc, 'right', color)
+            if gname == 'Macro':
+                mat_force = {'Z', 'W', '4'}
+                pat_force = {'Z', 'W', '4'}
+            elif gname == 'Micro':
+                mat_force = {'22'}
+                pat_force = {'22'}
+            elif gname == 'Dot':
+                mat_force = _dot_force[(mname, 'mat')]
+                pat_force = _dot_force[(mname, 'pat')]
+            else:
+                mat_force = set()
+                pat_force = set()
+            _hv(sides['mat'], xc, 'left',  color, force_toks=mat_force)
+            _hv(sides['pat'], xc, 'right', color, force_toks=pat_force)
 
-            # Label up to 2 lowest outliers below median per assembly
-            all_pts = pts_mat + pts_pat
-            if all_pts:
-                all_vals = [p[1] for p in all_pts]
-                med = np.median(all_vals)
-                outliers = [p for p in all_pts if p[1] < med - 1e-4]
-                outliers.sort(key=lambda p: p[1])
-                for xpt, val, tok, s_name in outliers[:2]:
-                    ha = 'right' if s_name == 'left' else 'left'
-                    dx = -0.012 if s_name == 'left' else 0.012
-                    ax.text(xpt + dx, val, f'{tok}', fontsize=6.5, color='#0F172A',
-                            fontweight='bold', ha=ha, va='center', zorder=10)
-
-        ax.set_xticks([x_max / 2])
-        ax.set_xticklabels([gname], fontsize=8.5, fontweight='medium')
+        # X ticks with assembly names
+        ax.set_xticks([meth_centers[m] for m, _, _ in method_info])
+        ax.set_xticklabels(['Single', 'Dual', 'ONT'], fontsize=7.2)
         ax.tick_params(axis='x', length=0, pad=1.5)
+
         ax.yaxis.set_major_locator(mticker.MaxNLocator(nbins=4, integer=True))
-        ax.tick_params(axis='y', labelsize=8.0, length=2)
+        ax.tick_params(axis='y', colors='black', labelsize=7.2, length=2.0)
         if gi == 0:
-            ax.set_ylabel('Collinear cov. (%)', fontsize=9.0, labelpad=2)
-            ax.text(0.02, 1.01, 'Mat◀|▶Pat', transform=ax.transAxes,
-                    fontsize=7.0, color='#555555', ha='left', va='bottom')
+            ax.set_ylabel('Collinear (%)', fontsize=8.0, labelpad=2, color='black')
+            ax.text(0.02, 1.01, 'Mat◀|▶Pat',
+                    transform=ax.transAxes,
+                    fontsize=5.5, color='#555555',
+                    ha='left', va='bottom')
+            ax.spines['left'].set_color('black')
+        else:
+            ax.yaxis.set_tick_params(labelleft=True)
 
         for spine in ['top', 'right']:
             ax.spines[spine].set_visible(False)
         ax.spines['left'].set_linewidth(0.4)
+        ax.spines['left'].set_color('black')
         ax.spines['bottom'].set_linewidth(0.4)
+        ax.spines['bottom'].set_color('black')
 
-def _draw_panel_f(ax, df):
-    gap = 0.80
-    off = 0.18
-    slw = 0.9
-    ms  = 4.5
-    lw  = 0.4
+def _get_top_composition_x_layout():
+    cats = [('Macro', 'macro'), ('Micro', 'micro'), ('Dot', 'dot')]
+    asms = [('Single', '#FCA5A5'), ('Dual', '#EF4444'), ('ONT', '#991B1B')]
 
-    cat_x   = {cat: i * gap for i, cat in enumerate(_EF_CAT_ORDER)}
-    n_asm   = len(_EF_ASM_ORDER)
-    offsets = np.linspace(-(n_asm - 1) / 2 * off, (n_asm - 1) / 2 * off, n_asm)
+    items = []
+    x_pos = {}
+    cur_x = 0.0
+    for c_idx, (cname, ckey) in enumerate(cats):
+        if c_idx > 0:
+            cur_x += 1.25  # gap between categories
+        for a_idx, (aname, acol) in enumerate(asms):
+            if a_idx > 0:
+                cur_x += 0.95  # step between assemblies
+            x_pos[(ckey, aname)] = cur_x
+            items.append((cname, ckey, aname, cur_x, acol))
+        cur_x += 0.95
+    return items, x_pos
 
-    cat_expected = {}
-    for cat in _EF_CAT_ORDER:
-        rows = df[df['category'] == cat]
-        if not rows.empty:
-            cat_expected[cat] = int(rows['n_telo_expected'].iloc[0])
+def _draw_panel_b_telomeres(ax, single_data, dual_data, ont_data):
+    """
+    Panel C: Vertical stacked bar plot showing telomere completeness across 9 bars:
+      3 categories (Macro, Micro, Dot)
+      x 3 assemblies (Single, Dual, ONT)
+      (summed across haplotypes).
+    Colors:
+      - 2 telomeres: #0F172A (Black)
+      - 1 telomere:  #94A3B8 (Medium gray)
+      - 0 telomeres: #F1F5F9 (Light gray with border)
+    """
+    items, x_pos = _get_top_composition_x_layout()
+    asms = {
+        'Single': single_data.get('telo_counts', {}),
+        'Dual':   dual_data.get('telo_counts', {}),
+        'ONT':    ont_data.get('telo_counts', {}),
+    }
 
-    for ai, asm in enumerate(_EF_ASM_ORDER):
-        color = _EF_ASM_COLORS[asm]
-        sub   = df[(df['assembly'] == asm) & (df['category'].isin(_EF_CAT_ORDER))]
-        sub   = sub.set_index('category')
+    bar_w = 0.68
+    for cname, ckey, aname, x, _ in items:
+        t_counts = asms[aname]
+        counts_m = t_counts.get((ckey, 'mat'), {0: 0, 1: 0, 2: 0})
+        counts_p = t_counts.get((ckey, 'pat'), {0: 0, 1: 0, 2: 0})
+        n2 = counts_m.get(2, 0) + counts_p.get(2, 0)
+        n1 = counts_m.get(1, 0) + counts_p.get(1, 0)
+        n0 = counts_m.get(0, 0) + counts_p.get(0, 0)
+        tot = n2 + n1 + n0
+        if tot <= 0:
+            continue
 
-        for cat in _EF_CAT_ORDER:
-            if cat not in sub.index:
-                continue
-            x         = cat_x[cat] + offsets[ai]
-            row       = sub.loc[cat]
-            frac      = row['telomere_pct'] / 100.0
-            n_present = int(row['n_telo_present'])
+        pct2 = (n2 / tot) * 100.0
+        pct1 = (n1 / tot) * 100.0
+        pct0 = (n0 / tot) * 100.0
 
-            ax.plot([x, x], [0, frac], color=color, lw=slw, solid_capstyle='round', zorder=3)
-            ax.scatter(x, frac, color=color, s=ms ** 2 * 0.5, zorder=4, ec='white', linewidths=0.3)
-            ax.text(x, frac + 0.05, f'{n_present}', ha='center', va='bottom',
-                    fontsize=7.0, color=color, zorder=5)
+        ax.bar(x, pct2, width=bar_w, bottom=0, color='#0F172A', edgecolor='#0F172A', lw=0.3, zorder=3)
+        ax.bar(x, pct1, width=bar_w, bottom=pct2, color='#94A3B8', edgecolor='#94A3B8', lw=0.3, zorder=3)
+        ax.bar(x, pct0, width=bar_w, bottom=pct2 + pct1, color='#F1F5F9', edgecolor='#94A3B8', lw=0.4, zorder=3)
 
-    ax.axhline(1.0, color='#aaaaaa', lw=0.5, ls='--', zorder=1)
-    ax.set_xlim(-gap * 0.6, (len(_EF_CAT_ORDER) - 1) * gap + gap * 0.6)
-    ax.set_ylim(0, 1.45)
-    ax.set_yticks([0, 0.50, 1.00])
-    ax.set_yticklabels(['0', '50', '100%'], fontsize=8.0)
-    ax.set_ylabel('Telomere (%)', fontsize=8.5, labelpad=2)
+        # Draw counts inside each fraction zone
+        if n2 > 0:
+            y2 = pct2 / 2.0
+            fs2 = 6.8 if pct2 >= 8 else 5.5
+            ax.text(x, y2, str(n2), va='center', ha='center', fontsize=fs2, color='white', fontweight='bold', zorder=4)
 
-    xtick_pos = [cat_x[c] for c in _EF_CAT_ORDER]
-    ax.set_xticks(xtick_pos)
-    ax.set_xticklabels([f"{_EF_CAT_LABELS[c]}\n(n={cat_expected.get(c, '?')})" for c in _EF_CAT_ORDER],
-                       fontsize=8.0)
-    ax.tick_params(axis='x', length=0, pad=2)
-    ax.tick_params(axis='y', labelsize=8.0, length=2)
+        if n1 > 0:
+            y1 = pct2 + (pct1 / 2.0)
+            fs1 = 6.8 if pct1 >= 8 else 5.5
+            ax.text(x, y1, str(n1), va='center', ha='center', fontsize=fs1, color='white', fontweight='bold', zorder=4)
+
+        if n0 > 0:
+            y0 = pct2 + pct1 + (pct0 / 2.0)
+            fs0 = 6.8 if pct0 >= 8 else 5.5
+            ax.text(x, y0, str(n0), va='center', ha='center', fontsize=fs0, color='#0F172A', fontweight='bold', zorder=4)
+
+    # Category titles at the top of the plot
+    cat_centers = {'Macro': 0.95, 'Micro': 5.05, 'Dot': 9.15}
+    for cname, cx in cat_centers.items():
+        ax.text(cx, 103.5, cname, ha='center', va='bottom', fontsize=8.8, fontweight='bold', color='#0F172A')
+
+    ax.set_xlim(-0.65, 10.75)
+    ax.set_ylim(0, 115)
+    ax.set_ylabel('Chromosomes (%)', fontsize=8.5, labelpad=2)
+    ax.set_yticks([0, 25, 50, 75, 100])
+    ax.set_xticks([x for _, _, _, x, _ in items])
+    ax.set_xticklabels([])  # Hidden to share x-axis with panel d below
+    ax.tick_params(axis='x', length=0)
+    ax.tick_params(axis='y', labelsize=7.5, length=2.0)
+
+    legend_elements = [
+        mpatches.Patch(facecolor='#0F172A', edgecolor='#0F172A', label='2 Telomeres'),
+        mpatches.Patch(facecolor='#94A3B8', edgecolor='#94A3B8', label='1 Telomere'),
+        mpatches.Patch(facecolor='#F1F5F9', edgecolor='#94A3B8', label='0 Telomeres'),
+    ]
+    ax.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(1.0, 1.15),
+              ncol=3, fontsize=7.2, frameon=False, handletextpad=0.4, columnspacing=0.8)
 
     for spine in ['top', 'right']:
         ax.spines[spine].set_visible(False)
-    ax.spines['left'].set_linewidth(lw)
-    ax.spines['bottom'].set_linewidth(lw)
+    ax.spines['left'].set_linewidth(0.4)
+    ax.spines['bottom'].set_linewidth(0.4)
+    ax.set_facecolor('white')
+
+def _draw_panel_c_switch_blocks(axes_by_cat, single_data, dual_data, ont_data):
+    """
+    Panel C: Total number of switch error blocks (count) and total switch block length (kb)
+    across chromosome categories (Macro, Micro, Dot) and assemblies (Single, Dual, ONT).
+    Dual y-axis:
+      - Left y-axis: Total switch block count (bars centered at x)
+      - Right y-axis: Total switch block length in kb (vivid magenta dots centered at x,
+        connected by a dashed vivid magenta tendency line across curation methods)
+    Colors:
+      - Bars: Single (#F472B6), Dual (#C026D3), ONT (#701A75)
+      - Dots & trend line: Vivid Magenta (#D946EF)
+      - Y-axes: Black
+    """
+    import matplotlib.ticker as ticker
+    sw_s = aggregate_switch_blocks(single_data)
+    sw_d = aggregate_switch_blocks(dual_data)
+    sw_o = aggregate_switch_blocks(ont_data)
+
+    method_info = [
+        ('Single', sw_s, '#F472B6'),
+        ('Dual',   sw_d, '#C026D3'),
+        ('ONT',    sw_o, '#701A75'),
+    ]
+
+    col_magenta = '#D946EF'
+    col_magenta_dark = '#C026D3'
+
+    cats = [('Macro', 'macro'), ('Micro', 'micro'), ('Dot', 'dot')]
+    bar_w = 0.48
+    x_positions = [0.0, 1.0, 2.0]  # Single, Dual, ONT
+
+    # Calculate global max for count and total length in kb to set consistent ylims
+    max_count = 1
+    max_tot_len_kb = 100.0
+    for sw_map in (sw_s, sw_d, sw_o):
+        for cname, ckey in cats:
+            cnt = sw_map.get((ckey, 'mat'), {}).get('count', 0) + sw_map.get((ckey, 'pat'), {}).get('count', 0)
+            max_count = max(max_count, cnt)
+            lens = sw_map.get((ckey, 'mat'), {}).get('lengths', []) + sw_map.get((ckey, 'pat'), {}).get('lengths', [])
+            tot_kb = sum(lens) / 1000.0
+            max_tot_len_kb = max(max_tot_len_kb, tot_kb)
+
+    ylim_cnt = int(np.ceil(max_count * 1.25))
+    ylim_cnt = max(ylim_cnt, 5)
+    ylim_kb = float(int(np.ceil(max_tot_len_kb * 1.20 / 500.0)) * 500.0)
+
+    for i, (cname, ckey) in enumerate(cats):
+        ax = axes_by_cat.get(cname)
+        if ax is None: continue
+        ax2 = ax.twinx()
+
+        lens_by_asm = []
+
+        # Draw count bars first (centered at x)
+        for idx, (mname, sw_map, col) in enumerate(method_info):
+            x = x_positions[idx]
+            cnt = sw_map.get((ckey, 'mat'), {}).get('count', 0) + sw_map.get((ckey, 'pat'), {}).get('count', 0)
+            lens = sw_map.get((ckey, 'mat'), {}).get('lengths', []) + sw_map.get((ckey, 'pat'), {}).get('lengths', [])
+            tot_kb = sum(lens) / 1000.0
+            lens_by_asm.append(tot_kb)
+
+            # Count bar
+            if cnt > 0:
+                ax.bar(x, cnt, width=bar_w, color=col, alpha=0.45, edgecolor=col, lw=0.7, zorder=2)
+                ax.text(x, cnt + ylim_cnt * 0.035, str(cnt), ha='center', va='bottom',
+                        fontsize=6.2, fontweight='bold', color='#0F172A', zorder=6)
+            else:
+                ax.plot([x - bar_w/2, x + bar_w/2], [0, 0], color=col, lw=1.0, zorder=2)
+
+        # Tendency line connecting length dots across curation methods in vivid magenta
+        ax2.plot(x_positions, lens_by_asm, color=col_magenta_dark, ls='--', lw=1.2, zorder=4)
+
+        # Vivid magenta length dots overlapping the bars (centered at x)
+        for idx, tot_kb in enumerate(lens_by_asm):
+            x = x_positions[idx]
+            ax2.scatter(x, tot_kb, marker='o', s=28, facecolor=col_magenta, edgecolor=col_magenta_dark, lw=0.8, zorder=5)
+
+            if tot_kb > 0:
+                lbl_txt = f"{tot_kb:,.0f} kb"
+                if cname == 'Dot':
+                    # Place length numbers below the dot in vivid magenta
+                    ax2.text(x, tot_kb - ylim_kb * 0.045, lbl_txt, ha='center', va='top',
+                             fontsize=5.6, fontweight='bold', color=col_magenta_dark, zorder=7)
+                else:
+                    # Macro and Micro: place length numbers above the dot in vivid magenta
+                    ax2.text(x, tot_kb + ylim_kb * 0.035, lbl_txt, ha='center', va='bottom',
+                             fontsize=5.6, fontweight='bold', color=col_magenta_dark, zorder=7)
+
+        ax.set_xticks(x_positions)
+        ax.set_xticklabels(['Single', 'Dual', 'ONT'], fontsize=7.2)
+        ax.set_xlim(-0.55, 2.55)
+        ax.set_ylim(0, ylim_cnt)
+        ax2.set_ylim(0, ylim_kb)
+        ax2.yaxis.set_major_formatter(ticker.StrMethodFormatter('{x:,.0f}'))
+        ax.set_facecolor('white')
+
+        ax.set_title(cname, fontsize=8.5, fontweight='bold', pad=3)
+        ax.tick_params(axis='x', length=0, pad=1.5)
+        ax.tick_params(axis='y', colors='black', labelsize=7.2, length=2.0)
+        ax2.tick_params(axis='y', colors='black', labelsize=7.2, length=2.0)
+
+        if i == 0:
+            ax.set_ylabel('Switch blocks (n, bar)', fontsize=8.0, labelpad=2, color='black')
+            ax.spines['left'].set_color('black')
+        else:
+            ax.tick_params(labelleft=False)
+
+        if i == 1:
+            import matplotlib.patches as mpatches
+            leg_handles = [
+                mpatches.Patch(facecolor='#C026D3', alpha=0.45, edgecolor='#A21CAF', lw=0.6, label='Count (n)'),
+                plt.Line2D([0], [0], marker='o', color=col_magenta_dark, ls='--', markerfacecolor=col_magenta,
+                           markeredgecolor=col_magenta_dark, markersize=4.5, lw=1.2, label='Length (kb)'),
+            ]
+            ax.legend(handles=leg_handles, loc='upper center', bbox_to_anchor=(0.50, 0.98),
+                      frameon=True, facecolor='#F8FAFC', edgecolor='#CBD5E1', framealpha=0.95,
+                      fontsize=6.5, handlelength=1.4, handletextpad=0.4, borderpad=0.3, labelspacing=0.25)
+
+        if i == len(cats) - 1:
+            ax2.set_ylabel('Total length (kb, dot)', fontsize=8.0, labelpad=2, color='black')
+            ax2.spines['right'].set_color('black')
+        else:
+            ax2.set_yticklabels([])
+
+        for spine in ['top']:
+            ax.spines[spine].set_visible(False)
+            ax2.spines[spine].set_visible(False)
+        ax.spines['left'].set_linewidth(0.4)
+        ax.spines['left'].set_color('black')
+        ax.spines['bottom'].set_linewidth(0.4)
+        ax.spines['bottom'].set_color('black')
+        ax.spines['right'].set_visible(False)
+        ax2.spines['left'].set_visible(False)
+        ax2.spines['bottom'].set_visible(False)
+        ax2.spines['right'].set_linewidth(0.4)
+        ax2.spines['right'].set_color('black')
+
+def _draw_panel_d_curation_gaps(ax, single_data, dual_data, ont_data):
+    """
+    Panel D: Vertical bar plot showing curation join counts across 9 bars:
+      3 categories (Macro, Micro, Dot)
+      x 3 assemblies (Single, Dual, ONT)
+      (summed across haplotypes).
+    Colors:
+      - Single: Light red (#FCA5A5)
+      - Dual:   Mid red   (#EF4444)
+      - ONT:    Dark red  (#991B1B)
+    """
+    gap_s = aggregate_curation_joins(single_data)
+    gap_d = aggregate_curation_joins(dual_data)
+    gap_o = aggregate_curation_joins(ont_data)
+
+    items, x_pos = _get_top_composition_x_layout()
+    asms = {
+        'Single': gap_s,
+        'Dual':   gap_d,
+        'ONT':    gap_o,
+    }
+
+    bar_w = 0.68
+    max_val = 1
+    for cname, ckey, aname, x, col in items:
+        val = asms[aname].get((ckey, 'mat'), 0) + asms[aname].get((ckey, 'pat'), 0)
+        max_val = max(max_val, val)
+        ax.bar(x, val, width=bar_w, color=col, edgecolor='#1E293B', lw=0.35, zorder=3)
+        if val > 0:
+            ax.text(x, val + 0.6, f'{val}', va='bottom', ha='center',
+                    fontsize=7.0, color='#1E293B', fontweight='bold')
+
+    ylim_max = float(int(np.ceil(max_val * 1.18 / 5.0)) * 5.0)
+    ax.set_xlim(-0.65, 10.75)
+    ax.set_ylim(0, ylim_max)
+    ax.set_ylabel('Curation joins (n)', fontsize=8.5, labelpad=2)
+    ax.tick_params(axis='y', labelsize=7.5, length=2.0)
+
+    # X ticks: Assembly names under each bar
+    x_locs = [x for _, _, _, x, _ in items]
+    x_lbls = [aname for _, _, aname, _, _ in items]
+    ax.set_xticks(x_locs)
+    ax.set_xticklabels(x_lbls, fontsize=7.2, color='#334155')
+    ax.tick_params(axis='x', length=2.0, pad=2.0)
+
+    # Category bracket labels underneath
+    cat_brackets = [
+        ('Macro', 0.0, 1.90, 0.95),
+        ('Micro', 4.10, 6.00, 5.05),
+        ('Dot', 8.20, 10.10, 9.15),
+    ]
+    for cname, x0, x1, cx in cat_brackets:
+        y_line = -0.16
+        y_text = -0.20
+        ax.plot([x0 - 0.25, x1 + 0.25], [y_line, y_line], transform=ax.get_xaxis_transform(),
+                color='#94A3B8', lw=0.8, clip_on=False)
+        ax.text(cx, y_text, cname, transform=ax.get_xaxis_transform(),
+                ha='center', va='top', fontsize=8.2, fontweight='bold', color='#0F172A')
+
+    for spine in ['top', 'right']:
+        ax.spines[spine].set_visible(False)
+    ax.spines['left'].set_linewidth(0.4)
+    ax.spines['bottom'].set_linewidth(0.4)
     ax.set_facecolor('white')
 
 def _load_annotation_tsv(path):
@@ -1242,8 +1735,8 @@ def _draw_panel_g(ax_left, ax_right, annotation_df):
     _GX = {('HiFi', 'hap1'): 0.00, ('HiFi', 'hap2'): 0.74, ('ONT', 'hap1'): 1.91, ('ONT', 'hap2'): 2.65}
     xlim_bars = (-0.46, 3.11)
     bar_w = 0.60
-    fs_tick = 8.0
-    fs_title = 9.0
+    fs_tick = 7.2
+    fs_title = 7.8
 
     col_pcg = next((c for c in ['Nr.protein coding genes', 'PCGs', 'protein_coding_genes'] if c in annotation_df.columns), None)
 
@@ -1284,13 +1777,13 @@ def _draw_panel_g(ax_left, ax_right, annotation_df):
         ax.set_facecolor('none')
 
         # 1. Title at top
-        ax.text(0.5, 1.25, title, transform=ax.transAxes, ha='center', va='center',
+        ax.text(0.5, 1.15, title, transform=ax.transAxes, ha='center', va='center',
                 fontsize=fs_title, fontweight='bold', color='#0F172A')
 
         # 2. Row of Protein-Coding Genes (PCG / N)
         trans_blended = mtransforms.blended_transform_factory(ax.transData, ax.transAxes)
-        ax.text(-0.02, 1.08, 'N:', transform=ax.transAxes, ha='right', va='center',
-                fontsize=7.8, fontweight='bold', color='#475569')
+        ax.text(-0.02, 1.045, 'N:', transform=ax.transAxes, ha='right', va='center',
+                fontsize=7.0, fontweight='bold', color='#475569')
 
         # Divider top line above bar plot
         ax.plot([0, 1], [1.0, 1.0], transform=ax.transAxes, color='#E2E8F0', lw=0.4, clip_on=False)
@@ -1313,8 +1806,8 @@ def _draw_panel_g(ax_left, ax_right, annotation_df):
             # Gene count in the dedicated N: row
             if col_pcg:
                 pcg_val = int(float(str(row[col_pcg].iloc[0]).replace(',', '')))
-                ax.text(x, 1.08, f"{pcg_val:,}", transform=trans_blended, ha='center', va='center',
-                        fontsize=7.6, fontweight='bold', color='#1E293B', clip_on=False)
+                ax.text(x, 1.045, f"{pcg_val/1000.0:.1f}k", transform=trans_blended, ha='center', va='center',
+                        fontsize=6.6, fontweight='bold', color='#1E293B', clip_on=False)
 
         # X-tick labels under bars (technology removed -> H1, H2, H1, H2)
         xtick_locs = [_GX[spec] for spec in _G_ROW_SPECS]
@@ -1341,7 +1834,7 @@ def _draw_legend_card(ax_leg):
     fsize_hdr = 8.5
     fsize_txt = 7.8
 
-    # ── Section 1: Assemblies (x: 0.02 to 0.23) ────────────────────────────
+    # ── Section 1: Assemblies (x: 0.02 to 0.20) ────────────────────────────
     ax_leg.text(0.02, 0.85, 'Assemblies (Coll/NC):', fontsize=fsize_hdr, fontweight='bold', color='#1E293B')
     asms = [
         ('HiFi Single', COL_COV_S_DARK),
@@ -1350,29 +1843,29 @@ def _draw_legend_card(ax_leg):
     ]
     for i, (name, cd) in enumerate(asms):
         by = 0.63 - i * 0.24
-        ax_leg.add_patch(mpatches.Rectangle((0.020, by - 0.03), 0.015, 0.14, fc=cd, ec='none', alpha=1.00))
-        ax_leg.add_patch(mpatches.Rectangle((0.035, by - 0.03), 0.015, 0.14, fc=cd, ec='none', alpha=0.25))
-        ax_leg.text(0.055, by + 0.04, name, va='center', fontsize=fsize_txt, color='#334155')
+        ax_leg.add_patch(mpatches.Rectangle((0.020, by - 0.03), 0.012, 0.14, fc=cd, ec='none', alpha=1.00))
+        ax_leg.add_patch(mpatches.Rectangle((0.032, by - 0.03), 0.012, 0.14, fc=cd, ec='none', alpha=0.25))
+        ax_leg.text(0.048, by + 0.04, name, va='center', fontsize=fsize_txt, color='#334155')
 
-    # ── Section 2: Synteny Ribbons & Coverage (x: 0.24 to 0.48) ────────────
-    ax_leg.text(0.24, 0.85, 'Synteny Ribbons:', fontsize=fsize_hdr, fontweight='bold', color='#1E293B')
+    # ── Section 2: Synteny Ribbons & Coverage (x: 0.22 to 0.44) ────────────
+    ax_leg.text(0.22, 0.85, 'Synteny Ribbons:', fontsize=fsize_hdr, fontweight='bold', color='#1E293B')
     by0 = 0.63
-    ax_leg.add_patch(mpatches.Rectangle((0.240, by0 - 0.03), 0.008, 0.14, fc=COL_COV_S_DARK, ec='none', alpha=0.35))
-    ax_leg.add_patch(mpatches.Rectangle((0.248, by0 - 0.03), 0.008, 0.14, fc=COL_COV_D_DARK, ec='none', alpha=0.35))
-    ax_leg.add_patch(mpatches.Rectangle((0.256, by0 - 0.03), 0.008, 0.14, fc=COL_COV_O_DARK, ec='none', alpha=0.35))
-    ax_leg.add_patch(mpatches.Rectangle((0.240, by0 - 0.03), 0.024, 0.14, fc='none', ec='#64748B', lw=0.4))
-    ax_leg.text(0.270, by0 + 0.04, 'Collinear', va='center', fontsize=fsize_txt, color='#334155')
+    ax_leg.add_patch(mpatches.Rectangle((0.220, by0 - 0.03), 0.007, 0.14, fc=COL_COV_S_DARK, ec='none', alpha=0.35))
+    ax_leg.add_patch(mpatches.Rectangle((0.227, by0 - 0.03), 0.007, 0.14, fc=COL_COV_D_DARK, ec='none', alpha=0.35))
+    ax_leg.add_patch(mpatches.Rectangle((0.234, by0 - 0.03), 0.007, 0.14, fc=COL_COV_O_DARK, ec='none', alpha=0.35))
+    ax_leg.add_patch(mpatches.Rectangle((0.220, by0 - 0.03), 0.021, 0.14, fc='none', ec='#64748B', lw=0.4))
+    ax_leg.text(0.247, by0 + 0.04, 'Collinear', va='center', fontsize=fsize_txt, color='#334155')
 
     by1 = 0.63 - 1 * 0.24
-    ax_leg.add_patch(mpatches.Rectangle((0.240, by1 - 0.03), 0.024, 0.14, fc=COL_RIB_NC, ec=COL_RIB_NC_E, lw=0.4, alpha=0.55))
-    ax_leg.text(0.270, by1 + 0.04, 'Non-collinear', va='center', fontsize=fsize_txt, color='#334155')
+    ax_leg.add_patch(mpatches.Rectangle((0.220, by1 - 0.03), 0.021, 0.14, fc=COL_RIB_NC, ec=COL_RIB_NC_E, lw=0.4, alpha=0.55))
+    ax_leg.text(0.247, by1 + 0.04, 'Non-collinear', va='center', fontsize=fsize_txt, color='#334155')
 
     by2 = 0.63 - 2 * 0.24
-    ax_leg.add_patch(mpatches.Rectangle((0.240, by2 - 0.03), 0.024, 0.14, fc=COL_RIB_REC, ec=COL_RIB_REC_E, lw=0.4, alpha=ALPHA_RIB_REC))
-    ax_leg.text(0.270, by2 + 0.04, 'Uncovered Synteny', va='center', fontsize=fsize_txt, color='#334155')
+    ax_leg.add_patch(mpatches.Rectangle((0.220, by2 - 0.03), 0.021, 0.14, fc=COL_RIB_REC, ec=COL_RIB_REC_E, lw=0.4, alpha=ALPHA_RIB_REC))
+    ax_leg.text(0.247, by2 + 0.04, 'Uncovered Synteny', va='center', fontsize=fsize_txt, color='#334155')
 
-    # ── Section 3: Feature Markers (x: 0.49 to 0.83) ───────────────────────
-    ax_leg.text(0.49, 0.85, 'Feature Markers:', fontsize=fsize_hdr, fontweight='bold', color='#1E293B')
+    # ── Section 3: Feature Markers (x: 0.46 to 0.78) ───────────────────────
+    ax_leg.text(0.46, 0.85, 'Feature Markers:', fontsize=fsize_hdr, fontweight='bold', color='#1E293B')
     feats_col1 = [
         ('Switch Block',   'patch',   COL_SWITCH),
         ('Unloc Scaffold', 'unloc',   '#64748B'),
@@ -1386,29 +1879,29 @@ def _draw_legend_card(ax_leg):
     for i, (name, ftype, col) in enumerate(feats_col1):
         by = 0.63 - i * 0.24
         if ftype == 'patch':
-            ax_leg.add_patch(mpatches.Rectangle((0.490, by - 0.03), 0.020, 0.14, fc=col, ec='none'))
+            ax_leg.add_patch(mpatches.Rectangle((0.460, by - 0.03), 0.016, 0.14, fc=col, ec='none'))
         elif ftype == 'unloc':
-            ax_leg.add_patch(mpatches.Rectangle((0.490, by - 0.03), 0.020, 0.14, fc='none', ec=col, ls='--', lw=0.5))
+            ax_leg.add_patch(mpatches.Rectangle((0.460, by - 0.03), 0.016, 0.14, fc='none', ec=col, ls='--', lw=0.5))
         elif ftype == 'line':
-            ax_leg.plot([0.500, 0.500], [by - 0.03, by + 0.11], color=col, lw=1.2)
-        ax_leg.text(0.518, by + 0.04, name, va='center', fontsize=fsize_txt, color='#334155')
+            ax_leg.plot([0.468, 0.468], [by - 0.03, by + 0.11], color=col, lw=1.2)
+        ax_leg.text(0.482, by + 0.04, name, va='center', fontsize=fsize_txt, color='#334155')
 
     for i, (name, ftype, col) in enumerate(feats_col2):
         by = 0.63 - i * 0.24
         if ftype == 'line':
-            ax_leg.plot([0.665, 0.665], [by - 0.03, by + 0.11], color=col, lw=1.2)
+            ax_leg.plot([0.635, 0.635], [by - 0.03, by + 0.11], color=col, lw=1.2)
         elif ftype == 'telo_c':
-            ax_leg.scatter([0.665], [by + 0.04], color=col, s=12, ec='none')
+            ax_leg.scatter([0.635], [by + 0.04], color=col, s=12, ec='none')
         elif ftype == 'telo_nc':
-            ax_leg.scatter([0.665], [by + 0.04], color='white', s=12, ec=col, linewidths=0.7)
-        ax_leg.text(0.686, by + 0.04, name, va='center', fontsize=fsize_txt, color='#334155')
+            ax_leg.scatter([0.635], [by + 0.04], color='white', s=12, ec=col, linewidths=0.7)
+        ax_leg.text(0.650, by + 0.04, name, va='center', fontsize=fsize_txt, color='#334155')
 
-    # ── Section 4: Annotation Tech (x: 0.84 to 0.98) ───────────────────────
-    ax_leg.text(0.84, 0.85, 'Annotation Tech:', fontsize=fsize_hdr, fontweight='bold', color='#1E293B')
-    ax_leg.add_patch(mpatches.Rectangle((0.84, 0.52), 0.026, 0.16, facecolor='black', edgecolor='black', lw=0.4))
-    ax_leg.text(0.876, 0.60, 'HiFi', va='center', fontsize=fsize_txt, color='#334155')
-    ax_leg.add_patch(mpatches.Rectangle((0.84, 0.20), 0.026, 0.16, facecolor='white', edgecolor='black', lw=0.5, hatch='////'))
-    ax_leg.text(0.876, 0.28, 'ONT', va='center', fontsize=fsize_txt, color='#334155')
+    # ── Section 4: Annotation Tech (x: 0.81 to 0.98) ───────────────────────
+    ax_leg.text(0.81, 0.85, 'Annotation Tech:', fontsize=fsize_hdr, fontweight='bold', color='#1E293B')
+    ax_leg.add_patch(mpatches.Rectangle((0.81, 0.52), 0.020, 0.16, facecolor='black', edgecolor='black', lw=0.4))
+    ax_leg.text(0.838, 0.60, 'HiFi', va='center', fontsize=fsize_txt, color='#334155')
+    ax_leg.add_patch(mpatches.Rectangle((0.81, 0.20), 0.020, 0.16, facecolor='white', edgecolor='black', lw=0.5, hatch='////'))
+    ax_leg.text(0.838, 0.28, 'ONT', va='center', fontsize=fsize_txt, color='#334155')
 
 # =============================================================================
 # Main Figure Builder
@@ -1473,44 +1966,95 @@ def build_combined_figure(t2t_sizes, centromeres, p_arm_dict, t2t_telo,
     max_mic = get_max_size(MICRO_TOKENS)
     max_dot = int(math.ceil(get_max_size(DOT_TOKENS) / 2_000_000.0) * 2_000_000)
 
-    fig_w = 14.0
-    fig_h = 14.5
+    fig_w = 14.4
+    fig_h = 15.6
     fig = plt.figure(figsize=(fig_w, fig_h), facecolor='white')
 
-    # Vertical Height Ratios:
-    # Row 0: Top stats (a, b, c) -> 0.375 (37.5% of synteny row height)
-    # Row 1: Macro (d) -> 1.00 (Full width)
-    # Row 2: Micro (e, 60%) + Dot (f, 40%) -> 1.00
-    # Row 3: Panel g + Legend -> 0.30 (30% of synteny row height)
-    outer = GridSpec(4, 1, figure=fig,
-                     height_ratios=[0.375, 1.00, 1.00, 0.30],
-                     hspace=0.22,
-                     left=0.04, right=0.98, top=0.97, bottom=0.03)
+    # Vertical Height Ratios (5 Rows):
+    # Row 0: Top 2x2 grid (a: Collinearity, b: Telomeres, c: Switch blocks, d: Curation gaps) -> 0.665
+    # Row 1: Coverage (e, 74%) + Annotation error rates (f, 26%) -> 0.35
+    # Row 2: Macro synteny ideogram map (g) -> 0.85
+    # Row 3: Micro (h, 60%) + Dot (i, 40%) synteny ideograms -> 0.85
+    # Row 4: Publication Legend Card (full width, compact) -> 0.16
+    outer = GridSpec(5, 1, figure=fig,
+                     height_ratios=[0.665, 0.35, 0.85, 0.85, 0.16],
+                     hspace=0.28,
+                     left=0.04, right=0.98, top=0.98, bottom=0.025)
 
-    # ── Row 0: Panels a, b, c (Expanded Top Row) ────────────────────────────
-    inner_top = GridSpecFromSubplotSpec(1, 2, subplot_spec=outer[0, 0],
-                                        width_ratios=[0.30, 0.70], wspace=0.10)
-    ax_cov = fig.add_subplot(inner_top[0, 1])
+    # ── Row 0: Top 3-Column Block (Panels a–f) ──────────────────────────────
+    inner_row0 = GridSpecFromSubplotSpec(1, 3, subplot_spec=outer[0, 0],
+                                         width_ratios=[0.33, 0.33, 0.34],
+                                         wspace=0.22)
 
-    inner_stats = GridSpecFromSubplotSpec(2, 1, subplot_spec=inner_top[0, 0],
-                                          height_ratios=[1.3, 1.0], hspace=0.38)
-    inner_viol = GridSpecFromSubplotSpec(1, 3, subplot_spec=inner_stats[0], wspace=0.35)
+    # Column 1 (Left): Stacked Coverage Bars (top, a) + Collinear Split-Violins (bottom, c)
+    comp1 = GridSpecFromSubplotSpec(2, 1, subplot_spec=inner_row0[0, 0],
+                                    height_ratios=[1.0, 1.0],
+                                    hspace=0.28)
+
+    # Panel a: Collinear & Non-collinear coverage stacked bars (Top, x-ticks hidden)
+    inner_stk = GridSpecFromSubplotSpec(1, 3, subplot_spec=comp1[0, 0], wspace=0.32)
+    ax_stk = {
+        'Macro': fig.add_subplot(inner_stk[0, 0]),
+        'Micro': fig.add_subplot(inner_stk[0, 1]),
+        'Dot':   fig.add_subplot(inner_stk[0, 2]),
+    }
+    _draw_panel_a_stacked_bars(ax_stk, all_macro, all_micro, all_dot,
+                               chrom_groups, cov_sum_s, cov_sum_d, cov_sum_o,
+                               hide_xticks=True)
+
+    # Panel c: Collinear split-violins (Bottom)
+    inner_viol = GridSpecFromSubplotSpec(1, 3, subplot_spec=comp1[1, 0], wspace=0.32)
     ax_viol = {
         'Macro': fig.add_subplot(inner_viol[0, 0]),
         'Micro': fig.add_subplot(inner_viol[0, 1]),
         'Dot':   fig.add_subplot(inner_viol[0, 2]),
     }
-    ax_f_telo = fig.add_subplot(inner_stats[1])
-
-    _draw_panel_d_violin(ax_viol, all_macro, all_micro, all_dot,
+    _draw_panel_c_violin(ax_viol, all_macro, all_micro, all_dot,
                          chrom_groups, cov_sum_s, cov_sum_d, cov_sum_o)
-    if df_stats is not None:
-        _draw_panel_f(ax_f_telo, df_stats)
-    _draw_full_coverage_panel(ax_cov, all_macro, all_micro, all_dot,
-                             chrom_groups, cov_sum_s, cov_sum_d, cov_sum_o)
 
-    # ── Row 1: Macrochromosomes (Panel d, Full Width) ────────────────────────
-    inner_mac = GridSpecFromSubplotSpec(1, 3, subplot_spec=outer[1, 0],
+    # Column 2 (Middle): Telomeres (top, b) + Curation joins (bottom, d)
+    comp2 = GridSpecFromSubplotSpec(2, 1, subplot_spec=inner_row0[0, 1],
+                                    height_ratios=[1.0, 1.0],
+                                    hspace=0.28)
+
+    # Panel b: Telomere completeness vertical stacked bars (Top, x-ticks hidden)
+    ax_telo = fig.add_subplot(comp2[0, 0])
+    _draw_panel_b_telomeres(ax_telo, single_data, dual_data, ont_data)
+
+    # Panel d: Curation joins vertical bars (Bottom)
+    ax_gaps = fig.add_subplot(comp2[1, 0])
+    _draw_panel_d_curation_gaps(ax_gaps, single_data, dual_data, ont_data)
+
+    # Column 3 (Right): Switch error blocks (top, e) + Annotation error rates (bottom, f)
+    comp3 = GridSpecFromSubplotSpec(2, 1, subplot_spec=inner_row0[0, 2],
+                                    height_ratios=[1.0, 1.0],
+                                    hspace=0.28)
+
+    # Panel e: Switch error blocks dual-axis (Top)
+    inner_sw = GridSpecFromSubplotSpec(1, 3, subplot_spec=comp3[0, 0], wspace=0.32)
+    ax_sw = {
+        'Macro': fig.add_subplot(inner_sw[0, 0]),
+        'Micro': fig.add_subplot(inner_sw[0, 1]),
+        'Dot':   fig.add_subplot(inner_sw[0, 2]),
+    }
+    _draw_panel_c_switch_blocks(ax_sw, single_data, dual_data, ont_data)
+
+    # Panel f: Annotation error rates (Bottom)
+    inner_f = GridSpecFromSubplotSpec(1, 2, subplot_spec=comp3[1, 0],
+                                      width_ratios=[0.50, 0.50], wspace=0.28)
+    ax_f_left  = fig.add_subplot(inner_f[0, 0])
+    ax_f_right = fig.add_subplot(inner_f[0, 1])
+
+    if annotation_df is not None:
+        _draw_panel_g(ax_f_left, ax_f_right, annotation_df)
+
+    # ── Row 1: Full-Width Per-Chromosome Coverage (Panel g, 100%) ───────────
+    ax_cov = fig.add_subplot(outer[1, 0])
+    _draw_full_coverage_panel(ax_cov, all_macro, all_micro, all_dot,
+                              chrom_groups, cov_sum_s, cov_sum_d, cov_sum_o)
+
+    # ── Row 2: Macrochromosomes Synteny Ideogram Map (Panel h) ──────────────
+    inner_mac = GridSpecFromSubplotSpec(1, 3, subplot_spec=outer[2, 0],
                                         width_ratios=[0.046, 0.477, 0.477], wspace=0.015)
     ax_mac_chr = fig.add_subplot(inner_mac[0, 0])
     ax_mac_mat = fig.add_subplot(inner_mac[0, 1])
@@ -1521,14 +2065,15 @@ def build_combined_figure(t2t_sizes, centromeres, p_arm_dict, t2t_telo,
     draw_synteny_panel(ax_mac_chr, ax_mac_mat, ax_mac_pat, MACRO_TOKENS, max_mac,
                        t2t_sizes, centromeres, t2t_telo, flip_set,
                        single_data, dual_data, ont_data,
-                       tick_step=10_000_000, tick_unit_mb=True)
+                       tick_step=10_000_000, tick_unit_mb=True,
+                       min_sw_width=600_000)
 
-    # ── Row 2: Microchromosomes (Panel e, 60%) + Dot chromosomes (Panel f, 40%) ──
-    inner_row2 = GridSpecFromSubplotSpec(1, 2, subplot_spec=outer[2, 0],
+    # ── Row 3: Microchromosomes (Panel i, 60%) + Dot chromosomes (Panel j, 40%) ──
+    inner_row3 = GridSpecFromSubplotSpec(1, 2, subplot_spec=outer[3, 0],
                                          width_ratios=[0.60, 0.40], wspace=0.07)
 
-    # Microchromosomes (Panel e)
-    inner_mic = GridSpecFromSubplotSpec(1, 3, subplot_spec=inner_row2[0, 0],
+    # Microchromosomes (Panel i)
+    inner_mic = GridSpecFromSubplotSpec(1, 3, subplot_spec=inner_row3[0, 0],
                                         width_ratios=[0.056, 0.472, 0.472], wspace=0.015)
     ax_mic_chr = fig.add_subplot(inner_mic[0, 0])
     ax_mic_mat = fig.add_subplot(inner_mic[0, 1])
@@ -1539,10 +2084,11 @@ def build_combined_figure(t2t_sizes, centromeres, p_arm_dict, t2t_telo,
     draw_synteny_panel(ax_mic_chr, ax_mic_mat, ax_mic_pat, MICRO_TOKENS, max_mic,
                        t2t_sizes, centromeres, t2t_telo, flip_set,
                        single_data, dual_data, ont_data,
-                       tick_step=2_000_000, tick_unit_mb=True)
+                       tick_step=2_000_000, tick_unit_mb=True,
+                       min_sw_width=120_000)
 
-    # Dot chromosomes (Panel f)
-    inner_dot = GridSpecFromSubplotSpec(1, 3, subplot_spec=inner_row2[0, 1],
+    # Dot chromosomes (Panel j)
+    inner_dot = GridSpecFromSubplotSpec(1, 3, subplot_spec=inner_row3[0, 1],
                                         width_ratios=[0.070, 0.465, 0.465], wspace=0.015)
     ax_dot_chr = fig.add_subplot(inner_dot[0, 0])
     ax_dot_mat = fig.add_subplot(inner_dot[0, 1])
@@ -1553,36 +2099,30 @@ def build_combined_figure(t2t_sizes, centromeres, p_arm_dict, t2t_telo,
     draw_synteny_panel(ax_dot_chr, ax_dot_mat, ax_dot_pat, DOT_TOKENS, max_dot,
                        t2t_sizes, centromeres, t2t_telo, flip_set,
                        single_data, dual_data, ont_data,
-                       tick_step=2_000_000, tick_unit_mb=True)
+                       tick_step=2_000_000, tick_unit_mb=True,
+                       min_sw_width=25_000)
 
-    # ── Row 3: Panel g (Left 44%) + Legend Card (Right 56%) ──────────────────
-    inner_bot = GridSpecFromSubplotSpec(1, 2, subplot_spec=outer[3, 0],
-                                        width_ratios=[0.44, 0.56], wspace=0.06)
-
-    # Left: Panel g with 2 full-width barplots
-    inner_g = GridSpecFromSubplotSpec(1, 2, subplot_spec=inner_bot[0, 0],
-                                      width_ratios=[0.50, 0.50], wspace=0.28)
-    ax_g_left  = fig.add_subplot(inner_g[0, 0])
-    ax_g_right = fig.add_subplot(inner_g[0, 1])
-
-    if annotation_df is not None:
-        _draw_panel_g(ax_g_left, ax_g_right, annotation_df)
-
-    # Right: Publication Legend Card
-    ax_leg = fig.add_subplot(inner_bot[0, 1])
+    # ── Row 4: Publication Legend Card (Full Width) ─────────────────────────
+    ax_leg = fig.add_subplot(outer[4, 0])
     _draw_legend_card(ax_leg)
 
-    # ── Panel Lettering a–g ──────────────────────────────────────────────────
+    # ── Panel Lettering a–j ──────────────────────────────────────────────────
     panel_letters = [
-        ('a', ax_viol['Macro'], -0.25, 1.08),
-        ('b', ax_f_telo,        -0.08, 1.08),
-        ('c', ax_cov,           -0.03, 1.04),
-        ('d', ax_mac_chr,       -0.45, 1.02),
-        ('e', ax_mic_chr,       -0.45, 1.02),
-        ('f', ax_dot_chr,       -0.45, 1.02),
+        ('a', ax_stk['Macro'],  -0.36, 1.08),
+        ('b', ax_telo,          -0.08, 1.06),
+        ('c', ax_viol['Macro'], -0.36, 1.08),
+        ('d', ax_gaps,          -0.08, 1.06),
+        ('e', ax_sw['Macro'],   -0.36, 1.08),
     ]
     if annotation_df is not None:
-        panel_letters.append(('g', ax_g_left, -0.25, 1.25))
+        panel_letters.append(('f', ax_f_left, -0.22, 1.15))
+
+    panel_letters.extend([
+        ('g', ax_cov,           -0.02, 1.05),
+        ('h', ax_mac_chr,       -0.45, 1.02),
+        ('i', ax_mic_chr,       -0.45, 1.02),
+        ('j', ax_dot_chr,       -0.45, 1.02),
+    ])
 
     for tag, ax_ref, lx, ly in panel_letters:
         ax_ref.text(lx, ly, tag, transform=ax_ref.transAxes,
@@ -1668,6 +2208,7 @@ def main():
     s_rec_rib, s_rec_sp, s_rec_sz  = load_recovered_chains(args.single_rec_chain)
     single_sizes.update(s_rec_sz)
     s_telo_coll, s_telo_nc = load_telomere_presence_tsv(args.single_telomeres)
+    s_telo_counts = load_telomere_counts_by_category(args.single_telomeres)
 
     single_data = {
         'col_ribbons': s_col_rib, 'nc_ribbons': s_nc_rib, 'rec_ribbons': s_rec_rib,
@@ -1675,7 +2216,8 @@ def main():
         'sizes': single_sizes, 'pairs': load_chrom_pairs(args.single_pairs),
         'sw': load_switch_blocks(args.single_bed),
         'gaps': load_gaps_bed(args.single_gaps),
-        'telo_coll': s_telo_coll, 'telo_nc': s_telo_nc
+        'telo_coll': s_telo_coll, 'telo_nc': s_telo_nc,
+        'telo_counts': s_telo_counts
     }
 
     d_col_rib, d_col_sp, d_col_ins = parse_chain_detailed(args.dual_chain, is_collinear=True)
@@ -1683,6 +2225,7 @@ def main():
     d_rec_rib, d_rec_sp, d_rec_sz  = load_recovered_chains(args.dual_rec_chain)
     dual_sizes.update(d_rec_sz)
     d_telo_coll, d_telo_nc = load_telomere_presence_tsv(args.dual_telomeres)
+    d_telo_counts = load_telomere_counts_by_category(args.dual_telomeres)
 
     dual_data = {
         'col_ribbons': d_col_rib, 'nc_ribbons': d_nc_rib, 'rec_ribbons': d_rec_rib,
@@ -1690,7 +2233,8 @@ def main():
         'sizes': dual_sizes, 'pairs': load_chrom_pairs(args.dual_pairs),
         'sw': load_switch_blocks(args.dual_bed),
         'gaps': load_gaps_bed(args.dual_gaps),
-        'telo_coll': d_telo_coll, 'telo_nc': d_telo_nc
+        'telo_coll': d_telo_coll, 'telo_nc': d_telo_nc,
+        'telo_counts': d_telo_counts
     }
 
     o_col_rib, o_col_sp, o_col_ins = parse_chain_detailed(args.ont_chain, is_collinear=True)
@@ -1698,6 +2242,7 @@ def main():
     o_rec_rib, o_rec_sp, o_rec_sz  = load_recovered_chains(args.ont_rec_chain)
     ont_sizes.update(o_rec_sz)
     o_telo_coll, o_telo_nc = load_telomere_presence_tsv(args.ont_telomeres)
+    o_telo_counts = load_telomere_counts_by_category(args.ont_telomeres)
 
     ont_data = {
         'col_ribbons': o_col_rib, 'nc_ribbons': o_nc_rib, 'rec_ribbons': o_rec_rib,
@@ -1705,7 +2250,8 @@ def main():
         'sizes': ont_sizes, 'pairs': load_chrom_pairs(args.ont_pairs),
         'sw': load_switch_blocks(args.ont_bed),
         'gaps': load_gaps_bed(args.ont_gaps),
-        'telo_coll': o_telo_coll, 'telo_nc': o_telo_nc
+        'telo_coll': o_telo_coll, 'telo_nc': o_telo_nc,
+        'telo_counts': o_telo_counts
     }
 
     # Merge sizes into t2t_sizes if needed

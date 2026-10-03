@@ -281,34 +281,40 @@ def load_telomere_presence_tsv(tsv_path):
 
 
 def load_coverage_summary(path):
-    """Loads per-chromosome coverage summary mapping chromosome token to (col_pct, nc_pct, unc_pct)."""
-    cov = defaultdict(list)
+    """Loads per-chromosome and per-haplotype coverage summary mapping (chrom, hap) to (col_pct, nc_pct, unc_pct)."""
+    cov = {}
     if not path or not os.path.exists(path):
         return cov
     df = pd.read_csv(path, sep='\t', comment='#')
     for _, row in df.iterrows():
         chrom_tok = str(row['chrom']).strip()
+        hap = str(row['haplotype']).strip().capitalize() if 'haplotype' in row else ('Pat' if 'Pat' in str(row['name']) else 'Mat')
         c = float(row['collinear_pct'])
         nc = float(row['noncollinear_pct'])
         u = float(row['uncovered_pct'])
-        cov[chrom_tok].append((c, nc, u))
+        cov[(chrom_tok, hap)] = (c, nc, u)
     return cov
 
 
-def get_avg_cov_for_chrom(tok, cov_dict):
-    """Computes average (col_pct, nc_pct, unc_pct) for chromosome token across haplotypes."""
+def get_hap_cov(tok, hap, cov_dict):
+    """Returns (col_pct, nc_pct, unc_pct) for a specific chromosome token and haplotype ('Mat' or 'Pat')."""
     if not cov_dict:
         return (0.0, 0.0, 100.0)
     if tok == 'ZW':
-        vals = cov_dict.get('W', []) + cov_dict.get('Z', [])
+        chrom_tok = 'W' if hap == 'Mat' else 'Z'
     else:
-        vals = cov_dict.get(tok, [])
-    if not vals:
-        return (0.0, 0.0, 100.0)
-    avg_c = sum(v[0] for v in vals) / len(vals)
-    avg_nc = sum(v[1] for v in vals) / len(vals)
-    avg_u = max(0.0, 100.0 - avg_c - avg_nc)
-    return (avg_c, avg_nc, avg_u)
+        chrom_tok = tok
+
+    val = cov_dict.get((chrom_tok, hap))
+    if val is None:
+        matching = [v for k, v in cov_dict.items() if k[0] == chrom_tok]
+        if matching:
+            val = matching[0]
+        else:
+            return (0.0, 0.0, 100.0)
+
+    c, nc, u = val
+    return (c, nc, max(0.0, 100.0 - c - nc))
 
 
 def parse_chain_detailed(chain_path, is_collinear=True, min_nc_size=MIN_NC_RIBBON_BP):
@@ -603,20 +609,20 @@ def plot_butterfly_macro(
 
     total_plot_height = n_tokens * ROW_H + 0.9
 
-    # 3. Figure & GridSpec
-    fig_w, fig_h = 22.0, 16.0
+    # 3. Figure & GridSpec (16.0 in x 12.0 in Canvas)
+    fig_w, fig_h = 16.0, 12.0
     fig = plt.figure(figsize=(fig_w, fig_h), facecolor='white')
 
-    # GridSpec: [ Chr (Left) | Maternal | Paternal | Right Column ]
-    gs = GridSpec(1, 4, figure=fig, width_ratios=[0.26, 3.65, 3.65, 1.44],
+    # GridSpec: [ Chr (Left) | Maternal | Paternal | Expanded Right Column ]
+    gs = GridSpec(1, 4, figure=fig, width_ratios=[0.26, 3.60, 3.60, 2.20],
                   wspace=0.035, left=0.035, right=0.98, top=0.94, bottom=0.06)
 
     ax_chr = fig.add_subplot(gs[0, 0])
     ax_mat = fig.add_subplot(gs[0, 1])
     ax_pat = fig.add_subplot(gs[0, 2])
 
-    # Right column split: [ Compact Coverage (rows 1-4) | Legend (rows 5-11) ]
-    gs_right = GridSpecFromSubplotSpec(2, 1, subplot_spec=gs[0, 3], height_ratios=[4.2, 6.8], hspace=0.20)
+    # Right column split: [ Expanded Coverage (60% height) | Legend ]
+    gs_right = GridSpecFromSubplotSpec(2, 1, subplot_spec=gs[0, 3], height_ratios=[6.5, 4.5], hspace=0.18)
     ax_cov = fig.add_subplot(gs_right[0, 0])
     ax_leg = fig.add_subplot(gs_right[1, 0])
     ax_leg.axis('off')
@@ -672,16 +678,19 @@ def plot_butterfly_macro(
             y_t2t = y_block_top - H_BAR_T2T / 2
             y_asm = y_t2t - (H_BAR_T2T / 2 + H_RIBBON + H_BAR_ASM / 2)
 
-            # Draw Coverage bar in compact ax_cov
-            cp, ncp, up = get_avg_cov_for_chrom(tok, cov_sum_dict)
+            # Draw Paired Coverage bars (Maternal 'M' and Paternal 'P') in ax_cov
             y_cov_c = (len(tokens) - 1) - row_idx
-            bar_h = 0.22
-            y_cov_bar = y_cov_c + (1 - b_idx) * bar_h
-            ax_cov.barh(y_cov_bar, cp, height=bar_h * 0.90, left=0, color=c_dark, ec='none', zorder=4)
-            ax_cov.barh(y_cov_bar, ncp, height=bar_h * 0.90, left=cp, color=c_light, ec='none', zorder=4)
-            ax_cov.barh(y_cov_bar, up, height=bar_h * 0.90, left=cp + ncp, color='#FFFFFF', ec='none', zorder=4)
-            ax_cov.add_patch(mpatches.Rectangle((0, y_cov_bar - (bar_h * 0.90) / 2), 100, bar_h * 0.90,
-                                                fc='none', ec='#94A3B8', lw=0.4, zorder=5))
+            y_group_c = y_cov_c + (1 - b_idx) * 0.26
+            bar_h = 0.095
+            for hap, lbl, dy in [('Mat', 'M', +0.055), ('Pat', 'P', -0.055)]:
+                y_bar = y_group_c + dy
+                cp, ncp, up = get_hap_cov(tok, hap, cov_sum_dict)
+                ax_cov.text(-3.0, y_bar, lbl, ha='right', va='center', fontsize=8.0, fontweight='bold', color='#334155', zorder=6)
+                ax_cov.barh(y_bar, cp, height=bar_h, left=0, color=c_dark, ec='none', zorder=4)
+                ax_cov.barh(y_bar, ncp, height=bar_h, left=cp, color=c_light, ec='none', zorder=4)
+                ax_cov.barh(y_bar, up, height=bar_h, left=cp + ncp, color='#FFFFFF', ec='none', zorder=4)
+                ax_cov.add_patch(mpatches.Rectangle((0, y_bar - bar_h / 2), 100, bar_h,
+                                                    fc='none', ec='#94A3B8', lw=0.3, zorder=5))
 
             # Render Maternal (left) and Paternal (right)
             for side, ax in [('mat', ax_mat), ('pat', ax_pat)]:
@@ -976,7 +985,7 @@ def plot_butterfly_macro(
     ax_cov.set_yticklabels(y_labels, fontsize=10.0, fontweight='bold', color='#1E293B')
     ax_cov.tick_params(axis='y', length=3.0, width=0.8, color='#94A3B8')
 
-    ax_cov.set_xlim(0, 100)
+    ax_cov.set_xlim(-10, 105)
     ax_cov.set_xticks([0, 25, 50, 75, 100])
     ax_cov.set_xticklabels(['0', '25', '50', '75', '100%'], fontsize=9.5, fontweight='medium', color='#1E293B')
     ax_cov.set_xlabel('Coverage (%)', fontsize=11.0, fontweight='bold', labelpad=5, color='#1E293B')
@@ -991,7 +1000,7 @@ def plot_butterfly_macro(
     ax_cov.spines['bottom'].set_color('#CBD5E1')
     ax_cov.spines['bottom'].set_linewidth(0.8)
     ax_cov.tick_params(axis='x', length=3.0, width=0.8, which='major', labelsize=9.5, color='#1E293B')
-    ax_cov.set_title('Coverage', fontsize=14.0, fontweight='bold', pad=8, color='#1E293B')
+    ax_cov.set_title('Coverage (Mat / Pat)', fontsize=13.0, fontweight='bold', pad=8, color='#1E293B')
 
     # Alternating row background shading in ax_cov
     for r_idx in range(n_tok):
