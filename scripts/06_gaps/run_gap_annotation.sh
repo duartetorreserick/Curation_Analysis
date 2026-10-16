@@ -12,7 +12,7 @@ echo "=== [1/3] Annotating Gaps: DUAL ==="
 python3 "$SCRIPT" \
     --mode dual \
     --gaps-bed "$BASE/results/dual/06_gaps_dual/dual_combined.renamed.gaps.bed" \
-    --fai "$BASE/results/dual/02_chainpipeline_dual/dual_combined.renamed.sorted.reoriented.fa.fai" \
+    --fai "$BASE/results/dual/02_chainpipeline_dual/02_chainpipeline_dual_strictLinearGap/dual_combined.renamed.sorted.reoriented.fa.fai" \
     --scaffold-map "$BASE/data/dual/scaffold_hap_to_combined_super.tsv" \
     --agp "$BASE/data/dual/corrected.agp" \
     --output-annotated "$BASE/results/dual/06_gaps_dual/dual_combined.renamed.sorted.reoriented.annotated.gaps.bed" \
@@ -23,7 +23,7 @@ echo "=== [2/3] Annotating Gaps: SINGLE ==="
 python3 "$SCRIPT" \
     --mode single \
     --gaps-bed "$BASE/results/single/06_gaps_single/single_combined.renamed.sorted.reoriented.gaps.bed" \
-    --fai "$BASE/results/single/02_chainpipeline_single/single_combined.renamed.sorted.reoriented.fa.fai" \
+    --fai "$BASE/results/single/02_chainpipeline_single/02_chainpipeline_single_strictLinearGap/single_combined.renamed.sorted.reoriented.fa.fai" \
     --scaffold-map "$BASE/data/single/scaffold_hap_to_combined_super.tsv" \
     --hap1-agp "$BASE/data/single/Hap1.corrected.agp" \
     --hap2-agp "$BASE/data/single/Hap2.corrected.agp" \
@@ -35,7 +35,7 @@ echo "=== [3/3] Annotating Gaps: ONT ==="
 python3 "$SCRIPT" \
     --mode ont \
     --gaps-bed "$BASE/results/ont/06_gaps_ont/ont_combined.renamed.gaps.bed" \
-    --fai "$BASE/results/ont/02_chainpipeline_ont/asm3_ONT_combined.sorted.reoriented.fa.fai" \
+    --fai "$BASE/results/ont/02_chainpipeline_ont/02_chainpipeline_ont_strictLinearGap/asm3_ONT_combined.sorted.reoriented.fa.fai" \
     --scaffold-map "$BASE/data/ont/scaffold_hap_to_combined_super.tsv" \
     --agp "$BASE/data/ont/corrected.agp" \
     --output-annotated "$BASE/results/ont/06_gaps_ont/asm3_ONT_combined.sorted.reoriented.annotated.gaps.bed" \

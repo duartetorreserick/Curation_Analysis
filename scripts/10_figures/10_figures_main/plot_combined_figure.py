@@ -32,6 +32,7 @@ from matplotlib.path import Path
 from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
 from scipy.stats import gaussian_kde
 import matplotlib.ticker as mticker
+import matplotlib.transforms as mtransforms
 
 # =============================================================================
 # Constants & Palette (Exact Supplementary Standard)
@@ -42,7 +43,7 @@ MIN_NC_RIBBON_BP        = 20_000   # 20 kb minimum alignment to display non-coll
 
 # Ideogram Base Colors
 COL_BORDER       = '#2c3e50'
-COL_T2T_FILL     = '#FFFFFF'       # T2T Reference is pure white / blank
+COL_T2T_FILL     = '#FFFFFF'       # T2T Reference filled with white (blank in non-synteny regions)
 COL_UNALIGNED    = '#FFFFFF'       # Unaligned assembly background is pure white
 
 # Assembly Coverage Colors (Dark = Collinear, Light = Non-Collinear)
@@ -80,9 +81,9 @@ _EF_ASM_COLORS = {
 }
 
 # Chromosome subsets for Main Figure
-MACRO_TOKENS = ['3', '4', 'W']
-MICRO_TOKENS = ['11', '14', '22']
-DOT_TOKENS   = ['16', '25', '35', '37']
+MACRO_TOKENS = ['4', 'W']
+MICRO_TOKENS = ['14', '22']
+DOT_TOKENS   = ['35', '37']
 
 # =============================================================================
 # Helper Utilities & Loaders
@@ -448,39 +449,16 @@ def parse_chain_detailed(chain_path, is_collinear=True, min_nc_size=MIN_NC_RIBBO
     return ribbons, query_spans, insertions
 
 def load_recovered_chains(rec_chain_path):
-    rec_ribbons = defaultdict(list)
-    rec_spans = defaultdict(list)
     sizes = {}
     if not rec_chain_path or not os.path.exists(rec_chain_path):
-        return rec_ribbons, rec_spans, sizes
+        return defaultdict(list), defaultdict(list), sizes
     with open(rec_chain_path) as f:
-        t_name = q_name = q_strand = None
-        t_pos = q_pos = 0
         for line in f:
-            line = line.strip()
-            if not line or line.startswith('#'): continue
             if line.startswith('chain'):
                 parts = line.split()
-                t_name, q_name = parts[2], parts[7]
-                t_size, q_size = int(parts[3]), int(parts[8])
-                sizes[t_name] = t_size
-                sizes[q_name] = q_size
-                q_strand = parts[9]
-                t_pos = int(parts[5])
-                q_raw_start = int(parts[10])
-                q_raw_end   = int(parts[11])
-                q_pos = (q_size - q_raw_end) if q_strand == '-' else q_raw_start
-            else:
-                parts = line.split()
-                size = int(parts[0])
-                dt = int(parts[1]) if len(parts) > 1 else 0
-                dq = int(parts[2]) if len(parts) > 2 else 0
-
-                rec_ribbons[t_name].append((t_name, t_pos, t_pos + size, q_name, q_pos, q_pos + size, q_strand, 'rec'))
-                rec_spans[q_name].append((q_pos, q_pos + size))
-                t_pos += size + dt
-                q_pos += size + dq
-
+                sizes[parts[2]] = int(parts[3])
+                sizes[parts[7]] = int(parts[8])
+    rec_ribbons, rec_spans, _ = parse_chain_detailed(rec_chain_path, is_collinear=True)
     return rec_ribbons, rec_spans, sizes
 
 def load_coverage_summary(path_s=None, path_d=None, path_ont=None):
@@ -693,8 +671,8 @@ def draw_synteny_panel(ax_chr, ax_mat, ax_pat, tokens, max_global_size,
         # Chromosome label in Col 0 (ax_chr) - elevated to foreground zorder 100
         lbl_text = f"chr{tok}"
         y_mid_row = y_row_top - 1.5 * BLOCK_H + BLOCK_GAP / 2
-        ax_chr.text(0.50, y_mid_row, lbl_text, ha='center', va='center',
-                    fontsize=10.5, fontweight='bold', color='#0F172A', zorder=100, clip_on=False)
+        ax_chr.text(0.35, y_mid_row, lbl_text, ha='center', va='center',
+                    fontsize=13.5, fontweight='bold', color='#0F172A', zorder=100, clip_on=False)
 
         assemblies = [
             ('HiFi Single', single_data, COL_COV_S_DARK, COL_RIB_NC),
@@ -730,6 +708,25 @@ def draw_synteny_panel(ax_chr, ax_mat, ax_pat, tokens, max_global_size,
                 t2t_len = t2t_sizes.get(t2t_chrom, 0)
                 if t2t_len == 0:
                     continue
+
+                # Outer margin track labels (T2T for top track, assembly name for bottom track)
+                trans_track = mtransforms.blended_transform_factory(ax.transAxes, ax.transData)
+                ASM_TRACK_LBLS = {0: 'HiFi+S', 1: 'HiFi+D', 2: 'ONT+D'}
+                asm_lbl = ASM_TRACK_LBLS.get(b_idx, asm_title)
+                if side == 'mat':
+                    ax.text(-0.015, y_t2t, 'T2T', transform=trans_track,
+                            ha='right', va='center', fontsize=9.5, fontweight='bold',
+                            color='#334155', clip_on=False)
+                    ax.text(-0.015, y_asm, asm_lbl, transform=trans_track,
+                            ha='right', va='center', fontsize=9.5, fontweight='bold',
+                            color='#334155', clip_on=False)
+                elif side == 'pat':
+                    ax.text(1.015, y_t2t, 'T2T', transform=trans_track,
+                            ha='left', va='center', fontsize=9.5, fontweight='bold',
+                            color='#334155', clip_on=False)
+                    ax.text(1.015, y_asm, asm_lbl, transform=trans_track,
+                            ha='left', va='center', fontsize=9.5, fontweight='bold',
+                            color='#334155', clip_on=False)
 
                 flip = t2t_chrom in flip_set
                 p_arm = 'p' if not flip else 'q'
@@ -923,12 +920,6 @@ def draw_synteny_panel(ax_chr, ax_mat, ax_pat, tokens, max_global_size,
                         ax.plot([gx, gx], [y_asm - H_BAR_ASM / 2, y_asm + H_BAR_ASM / 2],
                                 color=gap_col, lw=0.75, zorder=9, solid_capstyle='butt')
 
-                    m_lbl = re.search(r'unloc_([0-9]+)', u)
-                    s_tag = f"u{m_lbl.group(1)}" if m_lbl else "unloc"
-                    ax.text(u_off + u_len / 2, y_asm + H_BAR_ASM * 0.70, s_tag,
-                            ha='left', va='bottom', fontsize=7.0, color='#475569',
-                            fontweight='bold', rotation=40)
-
                 # =============================================================
                 # D. Synteny Ribbons (Exact Supplementary Standard)
                 # =============================================================
@@ -1012,12 +1003,12 @@ def draw_synteny_panel(ax_chr, ax_mat, ax_pat, tokens, max_global_size,
             num_val = (tick_val // 1_000_000) if tick_unit_mb else tick_val
             ax.plot([tick_val, tick_val], [y_axis, y_axis + tick_h], color='#1E293B', lw=0.8, zorder=10)
             ax.text(tick_val, y_axis - 0.08, f'{num_val}', ha='center', va='top',
-                    fontsize=8.8, color='#1E293B', fontweight='medium')
+                    fontsize=15.8, color='#1E293B', fontweight='medium')
 
         lbl_x = axis_max + tick_step * 0.15
         ha = 'right' if side == 'mat' else 'left'
         ax.text(lbl_x, y_axis, 'Mb' if tick_unit_mb else 'bp', ha=ha, va='center',
-                fontsize=9.5, fontweight='bold', color='#1E293B')
+                fontsize=12.5, fontweight='bold', color='#1E293B')
 
 # =============================================================================
 # Panel a / b / c / g Drawers
@@ -1114,22 +1105,23 @@ def _draw_full_coverage_panel(ax, all_macro_order, all_micro_order, all_nano_ord
                          fc='none', ec=COL_BORDER, lw=0.3, zorder=4))
 
     ax.set_xticks(list(x_tick.values()))
-    ax.set_xticklabels(list(x_tick.keys()), fontsize=7.2, rotation=0, ha='center')
+    x_lbls = [tok if idx % 2 == 0 else '' for idx, tok in enumerate(x_tick.keys())]
+    ax.set_xticklabels(x_lbls, fontsize=14.2, rotation=0, ha='center')
     ax.tick_params(axis='x', length=0, pad=1.5)
 
     for gname, (gx0, gx1) in group_xranges.items():
         x_data_mid = (gx0 + gx1) / 2
         x_frac = (x_data_mid - ax.get_xlim()[0]) / (ax.get_xlim()[1] - ax.get_xlim()[0])
         ax.text(x_frac, 1.04, gname, ha='center', va='bottom',
-                fontsize=9.0, fontweight='bold', color='#333333',
+                fontsize=12.0, fontweight='bold', color='#333333',
                 transform=ax.transAxes, clip_on=False)
         if gx0 > 0:
             ax.axvline(gx0 - group_gap / 2, color='#cccccc', lw=0.6, ls='--', zorder=1)
 
     ax.set_yticks([0, 25, 50, 75, 100])
-    ax.set_yticklabels(['0', '25', '50', '75', '100%'], fontsize=8.0)
-    ax.set_ylabel('Coverage (%)', fontsize=9.2, labelpad=2)
-    ax.tick_params(axis='y', labelsize=8.0, length=2.5)
+    ax.set_yticklabels(['0', '25', '50', '75', '100%'], fontsize=15.0)
+    ax.set_ylabel('Coverage (%)', fontsize=12.2, labelpad=2)
+    ax.tick_params(axis='y', labelsize=15.0, length=2.5)
 
     for spine in ['top', 'right']:
         ax.spines[spine].set_visible(False)
@@ -1193,26 +1185,26 @@ def _draw_panel_a_stacked_bars(axes_by_cat, all_macro_order, all_micro_order, al
             # Text label above bar showing collinear %
             tot_cov = avg_coll + avg_noncoll
             if tot_cov > 0:
-                ax.text(x, min(tot_cov + 1.8, 103.5), f"{avg_coll:.1f}%", ha='center', va='bottom',
-                        fontsize=5.8, fontweight='bold', color='#0F172A', zorder=6)
+                ax.text(x, min(tot_cov + 1.8, 103.5), f"{avg_coll:.1f}", ha='center', va='bottom',
+                        fontsize=12.8, fontweight='bold', color='#0F172A', zorder=6)
 
         ax.set_xticks(x_positions)
         if hide_xticks:
             ax.set_xticklabels([])
         else:
-            ax.set_xticklabels(['Single', 'Dual', 'ONT'], fontsize=7.2)
+            ax.set_xticklabels(['Single', 'Dual', 'ONT'], fontsize=14.2)
 
         ax.set_xlim(-0.55, 2.55)
         ax.set_ylim(0, 115)
         ax.set_yticks([0, 25, 50, 75, 100])
         ax.set_facecolor('white')
 
-        ax.set_title(gname, fontsize=8.5, fontweight='bold', pad=3)
+        ax.set_title(gname, fontsize=11.5, fontweight='bold', pad=3)
         ax.tick_params(axis='x', length=0, pad=1.5)
-        ax.tick_params(axis='y', colors='black', labelsize=7.2, length=2.0)
+        ax.tick_params(axis='y', colors='black', labelsize=14.2, length=2.0)
 
         if gi == 0:
-            ax.set_ylabel('Coverage (%)', fontsize=8.0, labelpad=2, color='black')
+            ax.set_ylabel('Coverage (%)', fontsize=11.0, labelpad=2, color='black')
             ax.spines['left'].set_color('black')
         else:
             ax.tick_params(labelleft=False)
@@ -1269,21 +1261,6 @@ def _draw_panel_c_violin(axes_by_cat, all_macro_order, all_micro_order, all_nano
     x_max = x
 
     np.random.seed(42)
-
-    _DOT_LABEL_TOKS = ('30', '25')
-    _dot_force = {}
-    for mname, cov_dict, _ in method_info:
-        if mname == 'ONT_Dual':
-            _dot_force[(mname, 'mat')] = set(_DOT_LABEL_TOKS)
-            _dot_force[(mname, 'pat')] = set()
-        else:
-            mat_force, pat_force = set(), set()
-            for tok_check in _DOT_LABEL_TOKS:
-                mat_v = next((v for v, t in vdata[('Dot', mname)]['mat'] if t == tok_check), 0.0)
-                pat_v = next((v for v, t in vdata[('Dot', mname)]['pat'] if t == tok_check), 0.0)
-                (mat_force if mat_v >= pat_v else pat_force).add(tok_check)
-            _dot_force[(mname, 'mat')] = mat_force
-            _dot_force[(mname, 'pat')] = pat_force
 
     for gi, (gname, _) in enumerate(group_specs):
         ax = axes_by_cat.get(gname)
@@ -1361,43 +1338,41 @@ def _draw_panel_c_violin(axes_by_cat, all_macro_order, all_micro_order, all_nano
                                 zorder=5, ec='none', alpha=0.55)
             for xi, yi, tok, is_lbl in zip(xpts, vals, toks, lbl_mask):
                 if is_lbl:
-                    _ax.scatter(xi, yi, color=color, s=7,
-                                zorder=7, ec='white', linewidths=0.25)
+                    _ax.scatter(xi, yi, color=color, s=14,
+                                zorder=7, ec='white', linewidths=0.45)
                     y_off = (_y_hi - _y_lo) * 0.04
-                    _ax.text(xi, yi - y_off, tok,
-                             ha='center', va='top',
-                             fontsize=5.2, color=color, zorder=8)
+                    y_pos = yi + y_off if (yi - y_off < _y_lo) else yi - y_off
+                    va_pos = 'bottom' if (yi - y_off < _y_lo) else 'top'
+                    _ax.text(xi, y_pos, tok,
+                             ha='center', va=va_pos,
+                             fontsize=12.2, fontweight='bold', color=color, zorder=8)
 
         for mname, _, color in method_info:
             xc    = meth_centers[mname]
             sides = vdata[(gname, mname)]
-            if gname == 'Macro':
-                mat_force = {'Z', 'W', '4'}
-                pat_force = {'Z', 'W', '4'}
-            elif gname == 'Micro':
-                mat_force = {'22'}
-                pat_force = {'22'}
-            elif gname == 'Dot':
-                mat_force = _dot_force[(mname, 'mat')]
-                pat_force = _dot_force[(mname, 'pat')]
-            else:
-                mat_force = set()
-                pat_force = set()
+
+            # Select the lowest collinear coverage outlier chromosome for each haplotype
+            mat_pts = sorted(sides['mat'], key=lambda item: item[0])
+            pat_pts = sorted(sides['pat'], key=lambda item: item[0])
+
+            mat_force = {mat_pts[0][1]} if mat_pts else set()
+            pat_force = {pat_pts[0][1]} if pat_pts else set()
+
             _hv(sides['mat'], xc, 'left',  color, force_toks=mat_force)
             _hv(sides['pat'], xc, 'right', color, force_toks=pat_force)
 
         # X ticks with assembly names
         ax.set_xticks([meth_centers[m] for m, _, _ in method_info])
-        ax.set_xticklabels(['Single', 'Dual', 'ONT'], fontsize=7.2)
+        ax.set_xticklabels(['Single', 'Dual', 'ONT'], fontsize=14.2)
         ax.tick_params(axis='x', length=0, pad=1.5)
 
         ax.yaxis.set_major_locator(mticker.MaxNLocator(nbins=4, integer=True))
-        ax.tick_params(axis='y', colors='black', labelsize=7.2, length=2.0)
+        ax.tick_params(axis='y', colors='black', labelsize=14.2, length=2.0)
         if gi == 0:
-            ax.set_ylabel('Collinear (%)', fontsize=8.0, labelpad=2, color='black')
+            ax.set_ylabel('Collinear (%)', fontsize=11.0, labelpad=2, color='black')
             ax.text(0.02, 1.01, 'Mat◀|▶Pat',
                     transform=ax.transAxes,
-                    fontsize=5.5, color='#555555',
+                    fontsize=12.5, color='#555555',
                     ha='left', va='bottom')
             ax.spines['left'].set_color('black')
         else:
@@ -1469,32 +1444,32 @@ def _draw_panel_b_telomeres(ax, single_data, dual_data, ont_data):
         # Draw counts inside each fraction zone
         if n2 > 0:
             y2 = pct2 / 2.0
-            fs2 = 6.8 if pct2 >= 8 else 5.5
+            fs2 = 9.8 if pct2 >= 8 else 8.5
             ax.text(x, y2, str(n2), va='center', ha='center', fontsize=fs2, color='white', fontweight='bold', zorder=4)
 
         if n1 > 0:
             y1 = pct2 + (pct1 / 2.0)
-            fs1 = 6.8 if pct1 >= 8 else 5.5
+            fs1 = 9.8 if pct1 >= 8 else 8.5
             ax.text(x, y1, str(n1), va='center', ha='center', fontsize=fs1, color='white', fontweight='bold', zorder=4)
 
         if n0 > 0:
             y0 = pct2 + pct1 + (pct0 / 2.0)
-            fs0 = 6.8 if pct0 >= 8 else 5.5
+            fs0 = 9.8 if pct0 >= 8 else 8.5
             ax.text(x, y0, str(n0), va='center', ha='center', fontsize=fs0, color='#0F172A', fontweight='bold', zorder=4)
 
     # Category titles at the top of the plot
     cat_centers = {'Macro': 0.95, 'Micro': 5.05, 'Dot': 9.15}
     for cname, cx in cat_centers.items():
-        ax.text(cx, 103.5, cname, ha='center', va='bottom', fontsize=8.8, fontweight='bold', color='#0F172A')
+        ax.text(cx, 103.5, cname, ha='center', va='bottom', fontsize=11.8, fontweight='bold', color='#0F172A')
 
     ax.set_xlim(-0.65, 10.75)
     ax.set_ylim(0, 115)
-    ax.set_ylabel('Chromosomes (%)', fontsize=8.5, labelpad=2)
+    ax.set_ylabel('Chromosomes (%)', fontsize=11.5, labelpad=2)
     ax.set_yticks([0, 25, 50, 75, 100])
     ax.set_xticks([x for _, _, _, x, _ in items])
     ax.set_xticklabels([])  # Hidden to share x-axis with panel d below
     ax.tick_params(axis='x', length=0)
-    ax.tick_params(axis='y', labelsize=7.5, length=2.0)
+    ax.tick_params(axis='y', labelsize=14.5, length=2.0)
 
     legend_elements = [
         mpatches.Patch(facecolor='#0F172A', edgecolor='#0F172A', label='2 Telomeres'),
@@ -1502,7 +1477,7 @@ def _draw_panel_b_telomeres(ax, single_data, dual_data, ont_data):
         mpatches.Patch(facecolor='#F1F5F9', edgecolor='#94A3B8', label='0 Telomeres'),
     ]
     ax.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(1.0, 1.15),
-              ncol=3, fontsize=7.2, frameon=False, handletextpad=0.4, columnspacing=0.8)
+              ncol=3, fontsize=10.2, frameon=False, handletextpad=0.4, columnspacing=0.8)
 
     for spine in ['top', 'right']:
         ax.spines[spine].set_visible(False)
@@ -1543,18 +1518,24 @@ def _draw_panel_c_switch_blocks(axes_by_cat, single_data, dual_data, ont_data):
 
     # Calculate global max for count and total length in kb to set consistent ylims
     max_count = 1
-    max_tot_len_kb = 100.0
+    max_tot_len_mb = 0.1
     for sw_map in (sw_s, sw_d, sw_o):
         for cname, ckey in cats:
             cnt = sw_map.get((ckey, 'mat'), {}).get('count', 0) + sw_map.get((ckey, 'pat'), {}).get('count', 0)
             max_count = max(max_count, cnt)
             lens = sw_map.get((ckey, 'mat'), {}).get('lengths', []) + sw_map.get((ckey, 'pat'), {}).get('lengths', [])
-            tot_kb = sum(lens) / 1000.0
-            max_tot_len_kb = max(max_tot_len_kb, tot_kb)
+            tot_mb = sum(lens) / 1_000_000.0
+            max_tot_len_mb = max(max_tot_len_mb, tot_mb)
 
     ylim_cnt = int(np.ceil(max_count * 1.25))
     ylim_cnt = max(ylim_cnt, 5)
-    ylim_kb = float(int(np.ceil(max_tot_len_kb * 1.20 / 500.0)) * 500.0)
+    if max_tot_len_mb >= 2.0:
+        ylim_mb = float(np.ceil(max_tot_len_mb * 1.20))
+    elif max_tot_len_mb >= 0.8:
+        ylim_mb = float(np.ceil(max_tot_len_mb * 1.20 / 0.5) * 0.5)
+    else:
+        ylim_mb = float(np.ceil(max_tot_len_mb * 1.20 / 0.2) * 0.2)
+    ylim_mb = max(ylim_mb, 0.4)
 
     for i, (cname, ckey) in enumerate(cats):
         ax = axes_by_cat.get(cname)
@@ -1568,14 +1549,14 @@ def _draw_panel_c_switch_blocks(axes_by_cat, single_data, dual_data, ont_data):
             x = x_positions[idx]
             cnt = sw_map.get((ckey, 'mat'), {}).get('count', 0) + sw_map.get((ckey, 'pat'), {}).get('count', 0)
             lens = sw_map.get((ckey, 'mat'), {}).get('lengths', []) + sw_map.get((ckey, 'pat'), {}).get('lengths', [])
-            tot_kb = sum(lens) / 1000.0
-            lens_by_asm.append(tot_kb)
+            tot_mb = sum(lens) / 1_000_000.0
+            lens_by_asm.append(tot_mb)
 
             # Count bar
             if cnt > 0:
                 ax.bar(x, cnt, width=bar_w, color=col, alpha=0.45, edgecolor=col, lw=0.7, zorder=2)
                 ax.text(x, cnt + ylim_cnt * 0.035, str(cnt), ha='center', va='bottom',
-                        fontsize=6.2, fontweight='bold', color='#0F172A', zorder=6)
+                        fontsize=9.2, fontweight='bold', color='#0F172A', zorder=6)
             else:
                 ax.plot([x - bar_w/2, x + bar_w/2], [0, 0], color=col, lw=1.0, zorder=2)
 
@@ -1583,36 +1564,25 @@ def _draw_panel_c_switch_blocks(axes_by_cat, single_data, dual_data, ont_data):
         ax2.plot(x_positions, lens_by_asm, color=col_magenta_dark, ls='--', lw=1.2, zorder=4)
 
         # Vivid magenta length dots overlapping the bars (centered at x)
-        for idx, tot_kb in enumerate(lens_by_asm):
+        for idx, tot_mb in enumerate(lens_by_asm):
             x = x_positions[idx]
-            ax2.scatter(x, tot_kb, marker='o', s=28, facecolor=col_magenta, edgecolor=col_magenta_dark, lw=0.8, zorder=5)
-
-            if tot_kb > 0:
-                lbl_txt = f"{tot_kb:,.0f} kb"
-                if cname == 'Dot':
-                    # Place length numbers below the dot in vivid magenta
-                    ax2.text(x, tot_kb - ylim_kb * 0.045, lbl_txt, ha='center', va='top',
-                             fontsize=5.6, fontweight='bold', color=col_magenta_dark, zorder=7)
-                else:
-                    # Macro and Micro: place length numbers above the dot in vivid magenta
-                    ax2.text(x, tot_kb + ylim_kb * 0.035, lbl_txt, ha='center', va='bottom',
-                             fontsize=5.6, fontweight='bold', color=col_magenta_dark, zorder=7)
+            ax2.scatter(x, tot_mb, marker='o', s=28, facecolor=col_magenta, edgecolor=col_magenta_dark, lw=0.8, zorder=5)
 
         ax.set_xticks(x_positions)
-        ax.set_xticklabels(['Single', 'Dual', 'ONT'], fontsize=7.2)
+        ax.set_xticklabels(['Single', 'Dual', 'ONT'], fontsize=14.2)
         ax.set_xlim(-0.55, 2.55)
         ax.set_ylim(0, ylim_cnt)
-        ax2.set_ylim(0, ylim_kb)
-        ax2.yaxis.set_major_formatter(ticker.StrMethodFormatter('{x:,.0f}'))
+        ax2.set_ylim(0, ylim_mb)
+        ax2.yaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: f'{y:.1f}' if y % 1 != 0 else f'{y:.0f}'))
         ax.set_facecolor('white')
 
-        ax.set_title(cname, fontsize=8.5, fontweight='bold', pad=3)
+        ax.set_title(cname, fontsize=11.5, fontweight='bold', pad=3)
         ax.tick_params(axis='x', length=0, pad=1.5)
-        ax.tick_params(axis='y', colors='black', labelsize=7.2, length=2.0)
-        ax2.tick_params(axis='y', colors='black', labelsize=7.2, length=2.0)
+        ax.tick_params(axis='y', colors='black', labelsize=14.2, length=2.0)
+        ax2.tick_params(axis='y', colors='black', labelsize=14.2, length=2.0)
 
         if i == 0:
-            ax.set_ylabel('Switch blocks (n, bar)', fontsize=8.0, labelpad=2, color='black')
+            ax.set_ylabel('Switch blocks (n, bar)', fontsize=11.0, labelpad=2, color='black')
             ax.spines['left'].set_color('black')
         else:
             ax.tick_params(labelleft=False)
@@ -1622,14 +1592,14 @@ def _draw_panel_c_switch_blocks(axes_by_cat, single_data, dual_data, ont_data):
             leg_handles = [
                 mpatches.Patch(facecolor='#C026D3', alpha=0.45, edgecolor='#A21CAF', lw=0.6, label='Count (n)'),
                 plt.Line2D([0], [0], marker='o', color=col_magenta_dark, ls='--', markerfacecolor=col_magenta,
-                           markeredgecolor=col_magenta_dark, markersize=4.5, lw=1.2, label='Length (kb)'),
+                           markeredgecolor=col_magenta_dark, markersize=4.5, lw=1.2, label='Length (Mbp)'),
             ]
             ax.legend(handles=leg_handles, loc='upper center', bbox_to_anchor=(0.50, 0.98),
                       frameon=True, facecolor='#F8FAFC', edgecolor='#CBD5E1', framealpha=0.95,
-                      fontsize=6.5, handlelength=1.4, handletextpad=0.4, borderpad=0.3, labelspacing=0.25)
+                      fontsize=9.5, handlelength=1.4, handletextpad=0.4, borderpad=0.3, labelspacing=0.25)
 
         if i == len(cats) - 1:
-            ax2.set_ylabel('Total length (kb, dot)', fontsize=8.0, labelpad=2, color='black')
+            ax2.set_ylabel('Total length (Mbp, dot)', fontsize=11.0, labelpad=2, color='black')
             ax2.spines['right'].set_color('black')
         else:
             ax2.set_yticklabels([])
@@ -1677,19 +1647,19 @@ def _draw_panel_d_curation_gaps(ax, single_data, dual_data, ont_data):
         ax.bar(x, val, width=bar_w, color=col, edgecolor='#1E293B', lw=0.35, zorder=3)
         if val > 0:
             ax.text(x, val + 0.6, f'{val}', va='bottom', ha='center',
-                    fontsize=7.0, color='#1E293B', fontweight='bold')
+                    fontsize=10.0, color='#1E293B', fontweight='bold')
 
     ylim_max = float(int(np.ceil(max_val * 1.18 / 5.0)) * 5.0)
     ax.set_xlim(-0.65, 10.75)
     ax.set_ylim(0, ylim_max)
-    ax.set_ylabel('Curation joins (n)', fontsize=8.5, labelpad=2)
-    ax.tick_params(axis='y', labelsize=7.5, length=2.0)
+    ax.set_ylabel('Curation joins (n)', fontsize=11.5, labelpad=2)
+    ax.tick_params(axis='y', labelsize=14.5, length=2.0)
 
     # X ticks: Assembly names under each bar
     x_locs = [x for _, _, _, x, _ in items]
     x_lbls = [aname for _, _, aname, _, _ in items]
     ax.set_xticks(x_locs)
-    ax.set_xticklabels(x_lbls, fontsize=7.2, color='#334155')
+    ax.set_xticklabels(x_lbls, fontsize=14.2, color='#334155')
     ax.tick_params(axis='x', length=2.0, pad=2.0)
 
     # Category bracket labels underneath
@@ -1704,7 +1674,7 @@ def _draw_panel_d_curation_gaps(ax, single_data, dual_data, ont_data):
         ax.plot([x0 - 0.25, x1 + 0.25], [y_line, y_line], transform=ax.get_xaxis_transform(),
                 color='#94A3B8', lw=0.8, clip_on=False)
         ax.text(cx, y_text, cname, transform=ax.get_xaxis_transform(),
-                ha='center', va='top', fontsize=8.2, fontweight='bold', color='#0F172A')
+                ha='center', va='top', fontsize=11.2, fontweight='bold', color='#0F172A')
 
     for spine in ['top', 'right']:
         ax.spines[spine].set_visible(False)
@@ -1735,8 +1705,8 @@ def _draw_panel_g(ax_left, ax_right, annotation_df):
     _GX = {('HiFi', 'hap1'): 0.00, ('HiFi', 'hap2'): 0.74, ('ONT', 'hap1'): 1.91, ('ONT', 'hap2'): 2.65}
     xlim_bars = (-0.46, 3.11)
     bar_w = 0.60
-    fs_tick = 7.2
-    fs_title = 7.8
+    fs_tick = 14.2
+    fs_title = 10.8
 
     col_pcg = next((c for c in ['Nr.protein coding genes', 'PCGs', 'protein_coding_genes'] if c in annotation_df.columns), None)
 
@@ -1783,7 +1753,7 @@ def _draw_panel_g(ax_left, ax_right, annotation_df):
         # 2. Row of Protein-Coding Genes (PCG / N)
         trans_blended = mtransforms.blended_transform_factory(ax.transData, ax.transAxes)
         ax.text(-0.02, 1.045, 'N:', transform=ax.transAxes, ha='right', va='center',
-                fontsize=7.0, fontweight='bold', color='#475569')
+                fontsize=10.0, fontweight='bold', color='#475569')
 
         # Divider top line above bar plot
         ax.plot([0, 1], [1.0, 1.0], transform=ax.transAxes, color='#E2E8F0', lw=0.4, clip_on=False)
@@ -1807,13 +1777,13 @@ def _draw_panel_g(ax_left, ax_right, annotation_df):
             if col_pcg:
                 pcg_val = int(float(str(row[col_pcg].iloc[0]).replace(',', '')))
                 ax.text(x, 1.045, f"{pcg_val/1000.0:.1f}k", transform=trans_blended, ha='center', va='center',
-                        fontsize=6.6, fontweight='bold', color='#1E293B', clip_on=False)
+                        fontsize=9.6, fontweight='bold', color='#1E293B', clip_on=False)
 
         # X-tick labels under bars (technology removed -> H1, H2, H1, H2)
         xtick_locs = [_GX[spec] for spec in _G_ROW_SPECS]
         xtick_lbls = [f"H{hap[-1]}" for _, hap in _G_ROW_SPECS]
         ax.set_xticks(xtick_locs)
-        ax.set_xticklabels(xtick_lbls, fontsize=7.8, rotation=0, ha='center', color='#1E293B')
+        ax.set_xticklabels(xtick_lbls, fontsize=14.8, rotation=0, ha='center', color='#1E293B')
         ax.tick_params(axis='x', length=0, pad=2)
 
 # =============================================================================
@@ -1831,8 +1801,8 @@ def _draw_legend_card(ax_leg):
                                              boxstyle="round,pad=0.015,rounding_size=0.03",
                                              fc='#F8FAFC', ec='#CBD5E1', lw=0.5))
 
-    fsize_hdr = 8.5
-    fsize_txt = 7.8
+    fsize_hdr = 11.5
+    fsize_txt = 10.8
 
     # ── Section 1: Assemblies (x: 0.02 to 0.20) ────────────────────────────
     ax_leg.text(0.02, 0.85, 'Assemblies (Coll/NC):', fontsize=fsize_hdr, fontweight='bold', color='#1E293B')
@@ -1966,33 +1936,33 @@ def build_combined_figure(t2t_sizes, centromeres, p_arm_dict, t2t_telo,
     max_mic = get_max_size(MICRO_TOKENS)
     max_dot = int(math.ceil(get_max_size(DOT_TOKENS) / 2_000_000.0) * 2_000_000)
 
-    fig_w = 14.4
-    fig_h = 15.6
+    fig_w = 20.74
+    fig_h = 19.80
     fig = plt.figure(figsize=(fig_w, fig_h), facecolor='white')
 
     # Vertical Height Ratios (5 Rows):
-    # Row 0: Top 2x2 grid (a: Collinearity, b: Telomeres, c: Switch blocks, d: Curation gaps) -> 0.665
-    # Row 1: Coverage (e, 74%) + Annotation error rates (f, 26%) -> 0.35
-    # Row 2: Macro synteny ideogram map (g) -> 0.85
-    # Row 3: Micro (h, 60%) + Dot (i, 40%) synteny ideograms -> 0.85
+    # Row 0: Top 3-column block (a–f QC metrics) -> 0.72
+    # Row 1: Full-width per-chromosome coverage (Panel g) -> 0.35
+    # Row 2: Macro synteny ideogram map (Panel h, 2 chroms: 4, W) -> 0.58
+    # Row 3: Micro (Panel i, 2 chroms: 14, 22) + Dot (Panel j, 2 chroms: 35, 37) -> 0.58
     # Row 4: Publication Legend Card (full width, compact) -> 0.16
     outer = GridSpec(5, 1, figure=fig,
-                     height_ratios=[0.665, 0.35, 0.85, 0.85, 0.16],
-                     hspace=0.28,
-                     left=0.04, right=0.98, top=0.98, bottom=0.025)
+                     height_ratios=[0.72, 0.35, 0.58, 0.58, 0.16],
+                     hspace=0.36,
+                     left=0.040, right=0.965, top=0.985, bottom=0.025)
 
     # ── Row 0: Top 3-Column Block (Panels a–f) ──────────────────────────────
     inner_row0 = GridSpecFromSubplotSpec(1, 3, subplot_spec=outer[0, 0],
                                          width_ratios=[0.33, 0.33, 0.34],
-                                         wspace=0.22)
+                                         wspace=0.28)
 
     # Column 1 (Left): Stacked Coverage Bars (top, a) + Collinear Split-Violins (bottom, c)
     comp1 = GridSpecFromSubplotSpec(2, 1, subplot_spec=inner_row0[0, 0],
                                     height_ratios=[1.0, 1.0],
-                                    hspace=0.28)
+                                    hspace=0.48)
 
     # Panel a: Collinear & Non-collinear coverage stacked bars (Top, x-ticks hidden)
-    inner_stk = GridSpecFromSubplotSpec(1, 3, subplot_spec=comp1[0, 0], wspace=0.32)
+    inner_stk = GridSpecFromSubplotSpec(1, 3, subplot_spec=comp1[0, 0], wspace=0.38)
     ax_stk = {
         'Macro': fig.add_subplot(inner_stk[0, 0]),
         'Micro': fig.add_subplot(inner_stk[0, 1]),
@@ -2003,7 +1973,7 @@ def build_combined_figure(t2t_sizes, centromeres, p_arm_dict, t2t_telo,
                                hide_xticks=True)
 
     # Panel c: Collinear split-violins (Bottom)
-    inner_viol = GridSpecFromSubplotSpec(1, 3, subplot_spec=comp1[1, 0], wspace=0.32)
+    inner_viol = GridSpecFromSubplotSpec(1, 3, subplot_spec=comp1[1, 0], wspace=0.38)
     ax_viol = {
         'Macro': fig.add_subplot(inner_viol[0, 0]),
         'Micro': fig.add_subplot(inner_viol[0, 1]),
@@ -2015,7 +1985,7 @@ def build_combined_figure(t2t_sizes, centromeres, p_arm_dict, t2t_telo,
     # Column 2 (Middle): Telomeres (top, b) + Curation joins (bottom, d)
     comp2 = GridSpecFromSubplotSpec(2, 1, subplot_spec=inner_row0[0, 1],
                                     height_ratios=[1.0, 1.0],
-                                    hspace=0.28)
+                                    hspace=0.48)
 
     # Panel b: Telomere completeness vertical stacked bars (Top, x-ticks hidden)
     ax_telo = fig.add_subplot(comp2[0, 0])
@@ -2028,10 +1998,10 @@ def build_combined_figure(t2t_sizes, centromeres, p_arm_dict, t2t_telo,
     # Column 3 (Right): Switch error blocks (top, e) + Annotation error rates (bottom, f)
     comp3 = GridSpecFromSubplotSpec(2, 1, subplot_spec=inner_row0[0, 2],
                                     height_ratios=[1.0, 1.0],
-                                    hspace=0.28)
+                                    hspace=0.48)
 
     # Panel e: Switch error blocks dual-axis (Top)
-    inner_sw = GridSpecFromSubplotSpec(1, 3, subplot_spec=comp3[0, 0], wspace=0.32)
+    inner_sw = GridSpecFromSubplotSpec(1, 3, subplot_spec=comp3[0, 0], wspace=0.38)
     ax_sw = {
         'Macro': fig.add_subplot(inner_sw[0, 0]),
         'Micro': fig.add_subplot(inner_sw[0, 1]),
@@ -2041,7 +2011,7 @@ def build_combined_figure(t2t_sizes, centromeres, p_arm_dict, t2t_telo,
 
     # Panel f: Annotation error rates (Bottom)
     inner_f = GridSpecFromSubplotSpec(1, 2, subplot_spec=comp3[1, 0],
-                                      width_ratios=[0.50, 0.50], wspace=0.28)
+                                      width_ratios=[0.50, 0.50], wspace=0.34)
     ax_f_left  = fig.add_subplot(inner_f[0, 0])
     ax_f_right = fig.add_subplot(inner_f[0, 1])
 
@@ -2055,12 +2025,12 @@ def build_combined_figure(t2t_sizes, centromeres, p_arm_dict, t2t_telo,
 
     # ── Row 2: Macrochromosomes Synteny Ideogram Map (Panel h) ──────────────
     inner_mac = GridSpecFromSubplotSpec(1, 3, subplot_spec=outer[2, 0],
-                                        width_ratios=[0.046, 0.477, 0.477], wspace=0.015)
+                                        width_ratios=[0.055, 0.4725, 0.4725], wspace=0.035)
     ax_mac_chr = fig.add_subplot(inner_mac[0, 0])
     ax_mac_mat = fig.add_subplot(inner_mac[0, 1])
     ax_mac_pat = fig.add_subplot(inner_mac[0, 2])
-    ax_mac_mat.set_title('Maternal', fontsize=12.5, fontweight='bold', pad=4, color='#1E293B')
-    ax_mac_pat.set_title('Paternal', fontsize=12.5, fontweight='bold', pad=4, color='#1E293B')
+    ax_mac_mat.set_title('Maternal', fontsize=15.5, fontweight='bold', pad=4, color='#1E293B')
+    ax_mac_pat.set_title('Paternal', fontsize=15.5, fontweight='bold', pad=4, color='#1E293B')
 
     draw_synteny_panel(ax_mac_chr, ax_mac_mat, ax_mac_pat, MACRO_TOKENS, max_mac,
                        t2t_sizes, centromeres, t2t_telo, flip_set,
@@ -2068,18 +2038,18 @@ def build_combined_figure(t2t_sizes, centromeres, p_arm_dict, t2t_telo,
                        tick_step=10_000_000, tick_unit_mb=True,
                        min_sw_width=600_000)
 
-    # ── Row 3: Microchromosomes (Panel i, 60%) + Dot chromosomes (Panel j, 40%) ──
+    # ── Row 3: Microchromosomes (Panel i, 58%) + Dot chromosomes (Panel j, 42%) ──
     inner_row3 = GridSpecFromSubplotSpec(1, 2, subplot_spec=outer[3, 0],
-                                         width_ratios=[0.60, 0.40], wspace=0.07)
+                                         width_ratios=[0.58, 0.42], wspace=0.10)
 
     # Microchromosomes (Panel i)
     inner_mic = GridSpecFromSubplotSpec(1, 3, subplot_spec=inner_row3[0, 0],
-                                        width_ratios=[0.056, 0.472, 0.472], wspace=0.015)
+                                        width_ratios=[0.065, 0.4675, 0.4675], wspace=0.035)
     ax_mic_chr = fig.add_subplot(inner_mic[0, 0])
     ax_mic_mat = fig.add_subplot(inner_mic[0, 1])
     ax_mic_pat = fig.add_subplot(inner_mic[0, 2])
-    ax_mic_mat.set_title('Maternal', fontsize=11.0, fontweight='bold', pad=4, color='#1E293B')
-    ax_mic_pat.set_title('Paternal', fontsize=11.0, fontweight='bold', pad=4, color='#1E293B')
+    ax_mic_mat.set_title('Maternal', fontsize=14.0, fontweight='bold', pad=4, color='#1E293B')
+    ax_mic_pat.set_title('Paternal', fontsize=14.0, fontweight='bold', pad=4, color='#1E293B')
 
     draw_synteny_panel(ax_mic_chr, ax_mic_mat, ax_mic_pat, MICRO_TOKENS, max_mic,
                        t2t_sizes, centromeres, t2t_telo, flip_set,
@@ -2089,12 +2059,12 @@ def build_combined_figure(t2t_sizes, centromeres, p_arm_dict, t2t_telo,
 
     # Dot chromosomes (Panel j)
     inner_dot = GridSpecFromSubplotSpec(1, 3, subplot_spec=inner_row3[0, 1],
-                                        width_ratios=[0.070, 0.465, 0.465], wspace=0.015)
+                                        width_ratios=[0.080, 0.460, 0.460], wspace=0.035)
     ax_dot_chr = fig.add_subplot(inner_dot[0, 0])
     ax_dot_mat = fig.add_subplot(inner_dot[0, 1])
     ax_dot_pat = fig.add_subplot(inner_dot[0, 2])
-    ax_dot_mat.set_title('Maternal', fontsize=11.0, fontweight='bold', pad=4, color='#1E293B')
-    ax_dot_pat.set_title('Paternal', fontsize=11.0, fontweight='bold', pad=4, color='#1E293B')
+    ax_dot_mat.set_title('Maternal', fontsize=14.0, fontweight='bold', pad=4, color='#1E293B')
+    ax_dot_pat.set_title('Paternal', fontsize=14.0, fontweight='bold', pad=4, color='#1E293B')
 
     draw_synteny_panel(ax_dot_chr, ax_dot_mat, ax_dot_pat, DOT_TOKENS, max_dot,
                        t2t_sizes, centromeres, t2t_telo, flip_set,
@@ -2126,7 +2096,7 @@ def build_combined_figure(t2t_sizes, centromeres, p_arm_dict, t2t_telo,
 
     for tag, ax_ref, lx, ly in panel_letters:
         ax_ref.text(lx, ly, tag, transform=ax_ref.transAxes,
-                    fontsize=12.5, fontweight='bold', va='bottom', ha='right', color='#0F172A')
+                    fontsize=15.5, fontweight='bold', va='bottom', ha='right', color='#0F172A')
 
     # ── Save Outputs ─────────────────────────────────────────────────────────
     print(f"Saving PNG: {out_png}")

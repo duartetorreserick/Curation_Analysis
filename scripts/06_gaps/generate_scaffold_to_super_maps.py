@@ -223,25 +223,45 @@ def run_single(hap1_file, hap2_file, hap2_vs_hap1_file, assign_file, fai_file, o
     write_tsv(out_file, rows)
 
 
-def run_ont(hap1_file, hap2_file, rename_file, fai_file, out_file):
+def run_ont(hap1_file, hap2_file, rename_file, assign_file, fai_file, out_file):
     print("=== Generating ONT scaffold mapping ===")
     h1_map = read_tsv_dict(hap1_file)
     h2_map = read_tsv_dict(hap2_file)
     rename_map = read_tsv_dict(rename_file, skip_header=True)
 
+    # Load hap_assignment if available (key: (H1/H2, SUPER_name) -> (mat/pat, combined_SUPER))
+    hap_assign = {}
+    if assign_file and os.path.exists(assign_file):
+        with open(assign_file) as f:
+            for line in f:
+                if line.strip() and not line.startswith('#'):
+                    p = line.strip().split('\t')
+                    if len(p) >= 4:
+                        mp, src, orig_name, new_name = p[0], p[1], p[2], p[3]
+                        hap = "H1" if new_name.endswith(".H1") else "H2"
+                        clean_name = new_name.split('.')[0]
+                        hap_assign[(hap, orig_name)] = (mp, clean_name)
+
     rows = []
-    # 1. Hap1: 39 Maternal autosomes + SUPER_W (Maternal) + SUPER_Z (Paternal)
+    # 1. Hap1
     for scaf, s_int in h1_map.items():
         s_ren = rename_map.get(s_int, s_int)
-        if s_int == "SUPER_Z":
-            mp = "pat"
-            fn = "Pat_SUPER_Z"
-        elif s_int == "SUPER_W":
-            mp = "mat"
-            fn = "Mat_SUPER_W"
+        key_ren = ("H1", s_ren)
+        key_int = ("H1", s_int)
+        if key_ren in hap_assign:
+            mp, fn = hap_assign[key_ren]
+        elif key_int in hap_assign:
+            mp, fn = hap_assign[key_int]
         else:
-            mp = "mat"
-            fn = f"Mat_{s_ren}"
+            if s_int == "SUPER_Z":
+                mp = "pat"
+                fn = "Pat_SUPER_Z"
+            elif s_int == "SUPER_W":
+                mp = "mat"
+                fn = "Mat_SUPER_W"
+            else:
+                mp = "mat"
+                fn = f"Mat_{s_ren}"
 
         rows.append({
             "combined_SUPER": fn,
@@ -252,11 +272,19 @@ def run_ont(hap1_file, hap2_file, rename_file, fai_file, out_file):
             "SUPER_renamed": s_ren
         })
 
-    # 2. Hap2: 39 Paternal autosomes
+    # 2. Hap2
     for scaf, s_int in h2_map.items():
         s_ren = rename_map.get(s_int, s_int)
-        mp = "pat"
-        fn = f"Pat_{s_ren}"
+        key_ren = ("H2", s_ren)
+        key_int = ("H2", s_int)
+        if key_ren in hap_assign:
+            mp, fn = hap_assign[key_ren]
+        elif key_int in hap_assign:
+            mp, fn = hap_assign[key_int]
+        else:
+            mp = "pat"
+            fn = f"Pat_{s_ren}"
+
         rows.append({
             "combined_SUPER": fn,
             "mat_pat": mp,
@@ -287,7 +315,7 @@ def main():
     parser.add_argument("--hap1-inter", help="Path to hap1.inter_chr.tsv")
     parser.add_argument("--hap2-inter", help="Path to hap2.inter_chr.tsv")
     parser.add_argument("--hap2-vs-hap1", help="Path to hap2.vs.hap1.tsv")
-    parser.add_argument("--hap-assignment", help="Path to hap_assignment.tsv (for dual/single)")
+    parser.add_argument("--hap-assignment", help="Path to hap_assignment.tsv (for dual/single/ont)")
     parser.add_argument("--new-names", help="Path to new_name_change.tsv (for ont)")
     parser.add_argument("--fai", help="Path to final assembly .fai index for validation")
     parser.add_argument("--out", help="Path to output mapping TSV file")
@@ -309,7 +337,7 @@ def main():
     elif args.mode == "ont":
         if not (args.hap1_inter and args.hap2_inter and args.new_names and args.out):
             parser.error("--mode ont requires: --hap1-inter, --hap2-inter, --new-names, --out")
-        run_ont(args.hap1_inter, args.hap2_inter, args.new_names, args.fai, args.out)
+        run_ont(args.hap1_inter, args.hap2_inter, args.new_names, args.hap_assignment, args.fai, args.out)
 
     elif args.mode == "all":
         b = args.base_dir
@@ -333,6 +361,7 @@ def main():
             os.path.join(b, "data/ont/hap1.inter_chr.tsv"),
             os.path.join(b, "data/ont/hap2.inter_chr.tsv"),
             os.path.join(b, "data/ont/new_name_change.tsv"),
+            os.path.join(b, "results/ont/01_formatting_assemblies_ont/hap_assignment.tsv"),
             os.path.join(b, "results/ont/02_chainpipeline_ont/asm3_ONT_combined.sorted.reoriented.fa.fai"),
             os.path.join(b, "data/ont/scaffold_hap_to_combined_super.tsv")
         )

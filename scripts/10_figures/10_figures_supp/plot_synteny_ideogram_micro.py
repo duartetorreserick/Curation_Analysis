@@ -63,7 +63,7 @@ MIN_NC_RIBBON_BP        = 20_000   # 20 kb minimum alignment to display non-coll
 
 # Palette
 COL_BORDER       = '#2c3e50'
-COL_T2T_FILL     = '#FFFFFF'
+COL_T2T_FILL     = '#E2E8F0'
 COL_UNALIGNED    = '#FFFFFF'
 
 # Collinear (Dark) & Non-Collinear (Light) Coverage Fills
@@ -281,34 +281,40 @@ def load_telomere_presence_tsv(tsv_path):
 
 
 def load_coverage_summary(path):
-    """Loads per-chromosome coverage summary mapping chromosome token to (col_pct, nc_pct, unc_pct)."""
-    cov = defaultdict(list)
+    """Loads per-chromosome and per-haplotype coverage summary mapping (chrom, hap) to (col_pct, nc_pct, unc_pct)."""
+    cov = {}
     if not path or not os.path.exists(path):
         return cov
     df = pd.read_csv(path, sep='\t', comment='#')
     for _, row in df.iterrows():
         chrom_tok = str(row['chrom']).strip()
+        hap = str(row['haplotype']).strip().capitalize() if 'haplotype' in row else ('Pat' if 'Pat' in str(row['name']) else 'Mat')
         c = float(row['collinear_pct'])
         nc = float(row['noncollinear_pct'])
         u = float(row['uncovered_pct'])
-        cov[chrom_tok].append((c, nc, u))
+        cov[(chrom_tok, hap)] = (c, nc, u)
     return cov
 
 
-def get_avg_cov_for_chrom(tok, cov_dict):
-    """Computes average (col_pct, nc_pct, unc_pct) for chromosome token across haplotypes."""
+def get_hap_cov(tok, hap, cov_dict):
+    """Returns (col_pct, nc_pct, unc_pct) for a specific chromosome token and haplotype ('Mat' or 'Pat')."""
     if not cov_dict:
         return (0.0, 0.0, 100.0)
     if tok == 'ZW':
-        vals = cov_dict.get('W', []) + cov_dict.get('Z', [])
+        chrom_tok = 'W' if hap == 'Mat' else 'Z'
     else:
-        vals = cov_dict.get(tok, [])
-    if not vals:
-        return (0.0, 0.0, 100.0)
-    avg_c = sum(v[0] for v in vals) / len(vals)
-    avg_nc = sum(v[1] for v in vals) / len(vals)
-    avg_u = max(0.0, 100.0 - avg_c - avg_nc)
-    return (avg_c, avg_nc, avg_u)
+        chrom_tok = tok
+
+    val = cov_dict.get((chrom_tok, hap))
+    if val is None:
+        matching = [v for k, v in cov_dict.items() if k[0] == chrom_tok]
+        if matching:
+            val = matching[0]
+        else:
+            return (0.0, 0.0, 100.0)
+
+    c, nc, u = val
+    return (c, nc, max(0.0, 100.0 - c - nc))
 
 
 def parse_chain_detailed(chain_path, is_collinear=True, min_nc_size=MIN_NC_RIBBON_BP):
@@ -606,19 +612,21 @@ def plot_butterfly_macro(
     fig_w, fig_h = 22.0, 25.5
     fig = plt.figure(figsize=(fig_w, fig_h), facecolor='white')
 
-    # GridSpec: [ Chr (Left) | Maternal | Paternal | Right Column ]
-    gs = GridSpec(1, 4, figure=fig, width_ratios=[0.26, 3.65, 3.65, 1.44],
-                  wspace=0.035, left=0.035, right=0.98, top=0.96, bottom=0.04)
+    # Outer GridSpec: [ Left Column (Panel a: Coverage + Legend) | Right Column (Panel b: Chr + Maternal + Paternal) ]
+    gs_outer = GridSpec(1, 2, figure=fig, width_ratios=[2.10, 7.46],
+                        wspace=0.055, left=0.045, right=0.98, top=0.96, bottom=0.04)
 
-    ax_chr = fig.add_subplot(gs[0, 0])
-    ax_mat = fig.add_subplot(gs[0, 1])
-    ax_pat = fig.add_subplot(gs[0, 2])
-
-    # Right column split: [ Compact Coverage (18 rows) | Legend ]
-    gs_right = GridSpecFromSubplotSpec(2, 1, subplot_spec=gs[0, 3], height_ratios=[10.0, 8.0], hspace=0.18)
-    ax_cov = fig.add_subplot(gs_right[0, 0])
-    ax_leg = fig.add_subplot(gs_right[1, 0])
+    # Left column split: [ Expanded Coverage (extended to legend) | Legend in bottom left ]
+    gs_left = GridSpecFromSubplotSpec(2, 1, subplot_spec=gs_outer[0, 0], height_ratios=[15.4, 3.1], hspace=0.07)
+    ax_cov = fig.add_subplot(gs_left[0, 0])
+    ax_leg = fig.add_subplot(gs_left[1, 0])
     ax_leg.axis('off')
+
+    # Right column split: [ Chr (Left) | Maternal | Paternal ]
+    gs_right = GridSpecFromSubplotSpec(1, 3, subplot_spec=gs_outer[0, 1], width_ratios=[0.26, 3.60, 3.60], wspace=0.025)
+    ax_chr = fig.add_subplot(gs_right[0, 0])
+    ax_mat = fig.add_subplot(gs_right[0, 1])
+    ax_pat = fig.add_subplot(gs_right[0, 2])
 
     y_top = total_plot_height
     y_bot = 0.0
@@ -671,16 +679,19 @@ def plot_butterfly_macro(
             y_t2t = y_block_top - H_BAR_T2T / 2
             y_asm = y_t2t - (H_BAR_T2T / 2 + H_RIBBON + H_BAR_ASM / 2)
 
-            # Draw Coverage bar in compact ax_cov
-            cp, ncp, up = get_avg_cov_for_chrom(tok, cov_sum_dict)
+            # Draw Paired Coverage bars (Maternal 'M' and Paternal 'P') in ax_cov
             y_cov_c = (len(tokens) - 1) - row_idx
-            bar_h = 0.22
-            y_cov_bar = y_cov_c + (1 - b_idx) * bar_h
-            ax_cov.barh(y_cov_bar, cp, height=bar_h * 0.90, left=0, color=c_dark, ec='none', zorder=4)
-            ax_cov.barh(y_cov_bar, ncp, height=bar_h * 0.90, left=cp, color=c_light, ec='none', zorder=4)
-            ax_cov.barh(y_cov_bar, up, height=bar_h * 0.90, left=cp + ncp, color='#FFFFFF', ec='none', zorder=4)
-            ax_cov.add_patch(mpatches.Rectangle((0, y_cov_bar - (bar_h * 0.90) / 2), 100, bar_h * 0.90,
-                                                fc='none', ec='#94A3B8', lw=0.4, zorder=5))
+            y_group_c = y_cov_c + (1 - b_idx) * 0.26
+            bar_h = 0.095
+            for hap, lbl, dy in [('Mat', 'M', +0.055), ('Pat', 'P', -0.055)]:
+                y_bar = y_group_c + dy
+                cp, ncp, up = get_hap_cov(tok, hap, cov_sum_dict)
+                ax_cov.text(-2.0, y_bar, lbl, ha='right', va='center', fontsize=8.0, fontweight='bold', color='#475569', zorder=6)
+                ax_cov.barh(y_bar, cp, height=bar_h, left=0, color=c_dark, ec='none', zorder=4)
+                ax_cov.barh(y_bar, ncp, height=bar_h, left=cp, color=c_light, ec='none', zorder=4)
+                ax_cov.barh(y_bar, up, height=bar_h, left=cp + ncp, color='#FFFFFF', ec='none', zorder=4)
+                ax_cov.add_patch(mpatches.Rectangle((0, y_bar - bar_h / 2), 100, bar_h,
+                                                    fc='none', ec='#94A3B8', lw=0.3, zorder=5))
 
             # Render Maternal (left) and Paternal (right)
             for side, ax in [('mat', ax_mat), ('pat', ax_pat)]:
@@ -771,7 +782,33 @@ def plot_butterfly_macro(
                 else:
                     t2t_path = _rect_path(0, t2t_len, y_t2t, H_BAR_T2T)
 
-                ax.add_patch(PathPatch(t2t_path, fc=COL_T2T_FILL, ec=COL_BORDER, lw=0.6, zorder=5))
+                ax.add_patch(PathPatch(t2t_path, fc=COL_UNALIGNED, ec=COL_BORDER, lw=0.6, zorder=5))
+
+                # T2T Non-collinear synteny coverage bands (under collinear)
+                t2t_nc = []
+                for r in asm['nc_ribbons'].get(t2t_chrom, []):
+                    _, ts, te, qn, _, _, _, _ = r
+                    if qn in offsets:
+                        t2t_nc.append((t2t_len - te, t2t_len - ts) if flip else (ts, te))
+                for s, e in _merge_intervals(t2t_nc):
+                    r = mpatches.Rectangle((min(s, e), y_t2t - H_BAR_T2T / 2),
+                                           abs(e - s), H_BAR_T2T,
+                                           fc=c_light, ec='none', alpha=0.85, zorder=6)
+                    r.set_clip_path(t2t_path, transform=ax.transData)
+                    ax.add_patch(r)
+
+                # T2T Collinear synteny coverage bands
+                t2t_col = []
+                for r in asm['col_ribbons'].get(t2t_chrom, []):
+                    _, ts, te, qn, _, _, _, _ = r
+                    if qn in offsets:
+                        t2t_col.append((t2t_len - te, t2t_len - ts) if flip else (ts, te))
+                for s, e in _merge_intervals(t2t_col):
+                    r = mpatches.Rectangle((min(s, e), y_t2t - H_BAR_T2T / 2),
+                                           abs(e - s), H_BAR_T2T,
+                                           fc=c_dark, ec='none', alpha=1.00, zorder=7)
+                    r.set_clip_path(t2t_path, transform=ax.transData)
+                    ax.add_patch(r)
 
                 # T2T Telomeres (colored black)
                 t2t_arms = t2t_telo.get(t2t_chrom, set())
@@ -825,7 +862,7 @@ def plot_butterfly_macro(
                         gx = (q_prim_len - (gs + ge) / 2) if flip else ((gs + ge) / 2)
                         if 'CURATION' in gtype:
                             ax.plot([gx, gx], [y_asm - H_BAR_ASM / 2, y_asm + H_BAR_ASM / 2],
-                                    color=COL_CUR_GAP, lw=0.7, zorder=9, solid_capstyle='butt')
+                                    color=COL_CUR_GAP, lw=1.3, zorder=9, solid_capstyle='butt')
                         else:
                             ax.plot([gx, gx], [y_asm - H_BAR_ASM / 2, y_asm + H_BAR_ASM / 2],
                                     color=COL_ASM_GAP, lw=0.7, zorder=8, solid_capstyle='butt')
@@ -875,17 +912,10 @@ def plot_butterfly_macro(
                         gx = u_off + (gs + ge) / 2
                         if 'CURATION' in gtype:
                             ax.plot([gx, gx], [y_asm - H_BAR_ASM / 2, y_asm + H_BAR_ASM / 2],
-                                    color=COL_CUR_GAP, lw=0.7, zorder=9, solid_capstyle='butt')
+                                    color=COL_CUR_GAP, lw=1.3, zorder=9, solid_capstyle='butt')
                         else:
                             ax.plot([gx, gx], [y_asm - H_BAR_ASM / 2, y_asm + H_BAR_ASM / 2],
                                     color=COL_ASM_GAP, lw=0.7, zorder=8, solid_capstyle='butt')
-
-                    # Label above unlinked scaffold
-                    m_lbl = re.search(r'unloc_([0-9]+)', u)
-                    s_tag = f"u{m_lbl.group(1)}" if m_lbl else "unloc"
-                    ax.text(u_off + u_len / 2, y_asm + H_BAR_ASM * 0.70, s_tag,
-                            ha='left', va='bottom', fontsize=7.5, color='#475569',
-                            fontweight='bold', rotation=40)
 
                 # =============================================================
                 # D. Synteny Ribbons (Collinear & Non-Collinear)
@@ -972,13 +1002,13 @@ def plot_butterfly_macro(
     ax_cov.set_ylim(-0.6, n_tok - 0.4)
     ax_cov.set_yticks(range(n_tok))
     y_labels = [('W/Z' if t == 'ZW' else t) for t in reversed(tokens)]
-    ax_cov.set_yticklabels(y_labels, fontsize=10.0, fontweight='bold', color='#1E293B')
+    ax_cov.set_yticklabels(y_labels, fontsize=13.0, fontweight='bold', color='#1E293B')
     ax_cov.tick_params(axis='y', length=3.0, width=0.8, color='#94A3B8')
 
-    ax_cov.set_xlim(0, 100)
+    ax_cov.set_xlim(-12, 105)
     ax_cov.set_xticks([0, 25, 50, 75, 100])
-    ax_cov.set_xticklabels(['0', '25', '50', '75', '100%'], fontsize=9.5, fontweight='medium', color='#1E293B')
-    ax_cov.set_xlabel('Coverage (%)', fontsize=11.0, fontweight='bold', labelpad=5, color='#1E293B')
+    ax_cov.set_xticklabels(['0', '25', '50', '75', '100%'], fontsize=12.5, fontweight='medium', color='#1E293B')
+    ax_cov.set_xlabel('Coverage (%)', fontsize=14.0, fontweight='bold', labelpad=5, color='#1E293B')
     ax_cov.grid(axis='x', color='#E2E8F0', linestyle='--', linewidth=0.6, alpha=0.9, zorder=0)
     ax_cov.set_axisbelow(True)
     ax_cov.spines['top'].set_visible(False)
@@ -989,8 +1019,8 @@ def plot_butterfly_macro(
     ax_cov.spines['bottom'].set_visible(True)
     ax_cov.spines['bottom'].set_color('#CBD5E1')
     ax_cov.spines['bottom'].set_linewidth(0.8)
-    ax_cov.tick_params(axis='x', length=3.0, width=0.8, which='major', labelsize=9.5, color='#1E293B')
-    ax_cov.set_title('Coverage', fontsize=14.0, fontweight='bold', pad=8, color='#1E293B')
+    ax_cov.tick_params(axis='x', length=3.0, width=0.8, which='major', labelsize=12.5, color='#1E293B')
+    ax_cov.set_title('Coverage (Mat / Pat)', fontsize=16.0, fontweight='bold', pad=8, color='#1E293B')
 
     # Alternating row background shading in ax_cov
     for r_idx in range(n_tok):
@@ -1019,31 +1049,82 @@ def plot_butterfly_macro(
         ha = 'right' if side == 'mat' else 'left'
         ax.text(lbl_x, y_axis, 'Mb', ha=ha, va='center', fontsize=12.5, fontweight='bold', color='#1E293B')
 
-    # 6. Publication Legend (enlarged, 2 columns)
-    legend_elements = [
-        # Collinear assemblies
-        mpatches.Patch(facecolor=COL_COV_S_DARK, edgecolor='none', label='Single Collinear'),
-        mpatches.Patch(facecolor=COL_COV_D_DARK, edgecolor='none', label='Dual Collinear'),
-        mpatches.Patch(facecolor=COL_COV_O_DARK, edgecolor='none', label='ONT Collinear'),
-        mpatches.Patch(facecolor=COL_RIB_NC, edgecolor=COL_RIB_NC_E, lw=0.4, alpha=0.65, label='Non-collinear Ribbon'),
-        mpatches.Patch(facecolor=COL_RIB_REC, edgecolor=COL_RIB_REC_E, lw=0.4, alpha=ALPHA_RIB_REC, label='Uncovered Synteny'),
-        mpatches.Patch(facecolor='none', edgecolor='#64748B', lw=0.9, ls='--', label='Unloc Scaffold'),
-        mpatches.Patch(facecolor=COL_SWITCH, edgecolor='none', label='Switch Block'),
-        plt.Line2D([0], [0], color=COL_CUR_GAP, lw=1.4, label='Curation Gap (Join)'),
-        plt.Line2D([0], [0], color=COL_ASM_GAP, lw=0.9, label='Assembly Gap'),
-        plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#000000', markeredgecolor='#000000',
-                   markersize=7.5, label='Collinear Telomere'),
-        plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='white', markeredgecolor='#000000',
-                   markeredgewidth=1.2, markersize=7.5, label='Non-collinear Telo.')
-    ]
+    # 6. Publication Legend (Organized 3-Section Card: Blocks, Ribbons, Features)
+    ax_leg.set_xlim(0, 1)
+    ax_leg.set_ylim(0, 1)
+    ax_leg.add_patch(mpatches.FancyBboxPatch((0.01, 0.02), 0.98, 0.95,
+                                             boxstyle="round,pad=0.015,rounding_size=0.03",
+                                             fc='#F8FAFC', ec='#CBD5E1', lw=0.9))
 
-    leg = ax_leg.legend(handles=legend_elements, loc='upper left',
-                        bbox_to_anchor=(0.0, 0.0, 1.0, 1.0), mode='expand',
-                        ncol=1, frameon=True,
-                        facecolor='#F8FAFC', edgecolor='#CBD5E1', fontsize=10.5,
-                        handlelength=1.4, handleheight=0.9, handletextpad=0.7,
-                        borderpad=0.9, labelspacing=0.9)
-    leg.get_frame().set_linewidth(0.9)
+    fsize_hdr = 11.0
+    fsize_txt = 10.2
+
+    # ── Left Column Top: Alignment Blocks (Coll / NC paired side-by-side) ──
+    ax_leg.text(0.04, 0.89, 'Blocks (Coll / NC):', fontsize=fsize_hdr, fontweight='bold', color='#0F172A', va='center')
+    block_items = [
+        ('HiFi Single', COL_COV_S_DARK, COL_COV_S_LIGHT),
+        ('HiFi Dual',   COL_COV_D_DARK, COL_COV_D_LIGHT),
+        ('ONT Dual',    COL_COV_O_DARK, COL_COV_O_LIGHT),
+    ]
+    for idx, (b_lbl, c_d, c_l) in enumerate(block_items):
+        by = 0.77 - idx * 0.105
+        ax_leg.add_patch(mpatches.Rectangle((0.04, by - 0.035), 0.042, 0.070, fc=c_d, ec='#334155', lw=0.35))
+        ax_leg.add_patch(mpatches.Rectangle((0.086, by - 0.035), 0.042, 0.070, fc=c_l, ec='#334155', lw=0.35))
+        ax_leg.text(0.142, by, b_lbl, fontsize=fsize_txt, color='#1E293B', va='center')
+
+    # ── Left Column Bottom: Synteny Ribbons ──
+    ax_leg.text(0.04, 0.42, 'Synteny Ribbons:', fontsize=fsize_hdr, fontweight='bold', color='#0F172A', va='center')
+    # Collinear Ribbon (tri-color swatch)
+    by_r0 = 0.30
+    ax_leg.add_patch(mpatches.Rectangle((0.040, by_r0 - 0.035), 0.029, 0.070, fc=COL_COV_S_DARK, ec='none', alpha=0.35))
+    ax_leg.add_patch(mpatches.Rectangle((0.069, by_r0 - 0.035), 0.029, 0.070, fc=COL_COV_D_DARK, ec='none', alpha=0.35))
+    ax_leg.add_patch(mpatches.Rectangle((0.098, by_r0 - 0.035), 0.030, 0.070, fc=COL_COV_O_DARK, ec='none', alpha=0.35))
+    ax_leg.add_patch(mpatches.Rectangle((0.040, by_r0 - 0.035), 0.088, 0.070, fc='none', ec='#64748B', lw=0.4))
+    ax_leg.text(0.142, by_r0, 'Collinear', fontsize=fsize_txt, color='#1E293B', va='center')
+
+    # Non-collinear Ribbon
+    by_r1 = 0.195
+    ax_leg.add_patch(mpatches.Rectangle((0.040, by_r1 - 0.035), 0.088, 0.070, fc=COL_RIB_NC, ec=COL_RIB_NC_E, lw=0.4, alpha=0.65))
+    ax_leg.text(0.142, by_r1, 'Non-collinear', fontsize=fsize_txt, color='#1E293B', va='center')
+
+    # Uncovered Synteny Ribbon
+    by_r2 = 0.090
+    ax_leg.add_patch(mpatches.Rectangle((0.040, by_r2 - 0.035), 0.088, 0.070, fc=COL_RIB_REC, ec=COL_RIB_REC_E, lw=0.4, alpha=ALPHA_RIB_REC))
+    ax_leg.text(0.142, by_r2, 'Uncovered Synteny', fontsize=fsize_txt, color='#1E293B', va='center')
+
+    # ── Right Column: Assembly Features ──
+    ax_leg.text(0.52, 0.89, 'Assembly Features:', fontsize=fsize_hdr, fontweight='bold', color='#0F172A', va='center')
+    feat_items = [
+        ('Switch Block',      'patch',   COL_SWITCH),
+        ('Unloc Scaffold',    'unloc',   '#64748B'),
+        ('Curation Gap',      'line',    COL_CUR_GAP),
+        ('Assembly Gap',      'line',    COL_ASM_GAP),
+        ('Collinear Telo.',   'telo_c',  '#000000'),
+        ('Non-collinear Telo.','telo_nc','#000000'),
+    ]
+    for idx, (f_lbl, f_type, f_col) in enumerate(feat_items):
+        by = 0.77 - idx * 0.132
+        if f_type == 'patch':
+            ax_leg.add_patch(mpatches.Rectangle((0.52, by - 0.035), 0.075, 0.070, fc=f_col, ec='none'))
+        elif f_type == 'unloc':
+            ax_leg.add_patch(mpatches.Rectangle((0.52, by - 0.035), 0.075, 0.070, fc='none', ec=f_col, lw=0.9, ls='--'))
+        elif f_type == 'line':
+            ax_leg.plot([0.557, 0.557], [by - 0.040, by + 0.040], color=f_col, lw=1.6)
+        elif f_type == 'telo_c':
+            ax_leg.plot([0.557], [by], marker='o', color='none', markerfacecolor='#000000', markeredgecolor='#000000', markersize=6.5)
+        elif f_type == 'telo_nc':
+            ax_leg.plot([0.557], [by], marker='o', color='none', markerfacecolor='white', markeredgecolor='#000000', markeredgewidth=1.2, markersize=6.5)
+        ax_leg.text(0.612, by, f_lbl, fontsize=fsize_txt, color='#1E293B', va='center')
+
+    # Panel Labels (lowercase 'a' and 'b')
+    ax_cov.annotate('a', xy=(0.0, 1.0), xycoords='axes fraction',
+                    xytext=(-26, 10), textcoords='offset points',
+                    fontsize=20, fontweight='bold', color='#0F172A',
+                    ha='right', va='bottom', annotation_clip=False)
+    ax_chr.annotate('b', xy=(0.0, 1.0), xycoords='axes fraction',
+                    xytext=(-4, 10), textcoords='offset points',
+                    fontsize=20, fontweight='bold', color='#0F172A',
+                    ha='left', va='bottom', annotation_clip=False)
 
     # 7. Save Outputs
     print(f"Saving PNG: {out_png}")
